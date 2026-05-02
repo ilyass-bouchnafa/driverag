@@ -269,4 +269,62 @@ def get_indexed_files() -> list[dict]:
     # Sort by path for better readability
     return sorted(files, key=lambda x: x["path"])
 
+def delete_chunks_by_source(source_name: str):
+    """
+    Delete all chunks associated with a given source file.
 
+    Why is this important?
+    ----------------------
+    In a RAG pipeline, each document is split into multiple chunks.
+    When a file is updated in Google Drive, we must:
+
+        1. Remove old chunks from the vector database
+        2. Re-index the updated content
+
+    This prevents:
+        - Duplicate chunks
+        - Outdated information
+        - Retrieval inconsistencies
+
+    Parameters
+    ----------
+    source_name : str
+        Name of the source file (e.g., "Chapter4_Management.pdf")
+    """
+
+    # ---------------------------------------------------------
+    # STEP 1: Get ChromaDB collection
+    # ---------------------------------------------------------
+    collection = get_collection()
+
+    # ---------------------------------------------------------
+    # STEP 2: Retrieve all chunks linked to this source
+    # ---------------------------------------------------------
+    # We filter using metadata: {"source": source_name}
+    results = collection.get(
+        where={"source": source_name},
+        include=["documents"]
+    )
+
+    # ---------------------------------------------------------
+    # STEP 3: Delete chunks from vector store
+    # ---------------------------------------------------------
+    if results["ids"]:
+        collection.delete(ids=results["ids"])
+
+        print(f"🗑️ Deleted {len(results['ids'])} chunks for {source_name}")
+
+        # -----------------------------------------------------
+        # STEP 4: Clean in-memory document store
+        # -----------------------------------------------------
+        # Some systems keep a local cache (doc_store)
+        # We must also remove entries to avoid stale references
+        global _doc_store
+
+        keys_to_delete = [
+            key for key in _doc_store
+            if key.startswith(source_name)
+        ]
+
+        for key in keys_to_delete:
+            del _doc_store[key]
