@@ -71,24 +71,13 @@ def chunk_pages(pages: list[dict]) -> list[dict]:
                 chunks.append({
                     "text": chunk_text.strip(),
                     "metadata": {
-                        # Original source file name
                         "source": page["source"],
-
-                        # Original page number
                         "page": page["page"],
-
-                        # Position of the chunk inside the page
                         "chunk_index": i,
-
-                        # Total number of pages in the source file
                         "total_pages": page["total_pages"],
-
-                        # Full Drive path if available
-                        # Otherwise fallback to source name
                         "drive_path": page.get("drive_path", page["source"]),
-                        
-                        # File format if available
-                        "file_format": page.get("file_format", "unknown")
+                        "file_format": page.get("file_format", "unknown"),
+                        "drive_modified_time": page.get("drive_modified_time", ""),  # ← AJOUT
                     }
                 })
 
