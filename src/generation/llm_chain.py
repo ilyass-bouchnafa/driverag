@@ -1,11 +1,15 @@
+import logging
+
 # Import Groq LLM (fast inference)
 from langchain_groq import ChatGroq
 
 # Import message schema for structured chat input
 from langchain.schema import SystemMessage, HumanMessage
 
+from langchain.callbacks.manager import collect_runs
+
 # Import project configuration
-from src.config import GROQ_API_KEY, TOP_K_RETRIEVAL, TOP_K_RERANKED
+from src.config import GROQ_API_KEY, LLM_MODEL, TOP_K_RETRIEVAL, TOP_K_RERANKED
 
 # Import retrieval pipeline
 from src.retrieval.query_processor import advanced_retrieve
@@ -13,21 +17,39 @@ from src.retrieval.query_processor import advanced_retrieve
 # Import reranker
 from src.retrieval.reranker import rerank
 
+from langsmith import traceable, Client
+
+logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------
 # SYSTEM PROMPT (MULTILINGUAL CONTROL)
 # ---------------------------------------------------------
-SYSTEM_PROMPT = """You are a rigorous and expert academic assistant.
+SYSTEM_PROMPT = """You are a rigorous, precise, and expert academic assistant specialized in the user's personal academic documents.
 
-STRICT RULES:
-1. You MUST answer ONLY using the provided context documents.
-2. For EVERY important statement, you MUST cite the source using this format: [File, Page X]
-3. If the answer is not found in the documents, respond EXACTLY:
+STRICT RULES - FOLLOW THEM ALL WITHOUT EXCEPTION:
+
+1. You MUST answer ONLY using the information explicitly present in the provided context documents.
+
+2. Answer the question EXACTLY as asked. Do not add any information that was not explicitly requested by the user.
+   - Do not give extra definitions, advantages, examples, or explanations unless the question specifically asks for them.
+   - Do not make summaries or conclusions unless the user explicitly asks for a summary.
+
+3. For every important statement, claim, definition, or explanation, you MUST cite the exact source immediately after the sentence using this format: [File Name, Page X].
+   Example: A filter is an operation that modifies an image using a kernel. [Chapitre I-II_Pr AMINE.pdf, Page 65]
+
+4. If the answer (or any part of it) cannot be directly found or supported in the provided documents, respond **EXACTLY** with this sentence and add absolutely nothing else:
    "I cannot find this information in the provided documents."
-4. NEVER invent information that is not present in the context.
-5. Your answer MUST be in the SAME LANGUAGE as the retrieved documents (context).
-6. If the question refers to previous conversation, take it into account.
-7. Be structured, precise, and academic in your response.
+
+5. PREVIOUS MESSAGES HANDLING:
+   - If any previous assistant message starts with "[STRONG RESTRICTION:", it means this message comes from Direct LLM mode.
+     → You MUST completely IGNORE that entire message.
+     → Do NOT use any facts, explanations, or ideas from it.
+
+6. NEVER invent, extrapolate, add extra details, or over-explain. Stick strictly to what the question asks and what the documents provide.
+7. NEVER cite a source that does not explicitly appear in the provided documents.
+8. Use clear, formal, precise, and academic language. Be concise and direct. Avoid unnecessary repetitions and conclusions.
+
+Always prioritize precision, conciseness, and strict fidelity to the user's question and the source documents.
 """
 
 # ---------------------------------------------------------
@@ -55,7 +77,8 @@ def format_context(chunks: list[dict]) -> str:
     # Add visual separators between chunks
     return "\n\n" + "─" * 40 + "\n\n".join(parts)
 
-def ask(question: str) -> dict:
+@traceable(run_type="chain", name="RAG Query")
+def ask(question: str, external_history: list = None, thread_id: str = None, conversation_id: str = None, langsmith_extra: dict = None) -> dict:
     """
     Full RAG pipeline:
 
@@ -70,6 +93,9 @@ def ask(question: str) -> dict:
     ----------
     question : str
         User query
+    
+    external_history : list
+        liste de langchain.schema messages (optionnel)
 
     Returns
     -------
@@ -105,21 +131,25 @@ def ask(question: str) -> dict:
     context = format_context(final_chunks)
 
     # ---------------------------------------------------------
-    # STEP 4: Conversation history
+    # STEP 4: Conversation history !!!
     # ---------------------------------------------------------
     # Keep only the last 5 exchanges (10 messages total)
-    history = _history[-10:]
+    if external_history is not None:
+        history = external_history[-10:]
+    else:
+        history = _history[-10:]
 
     # ---------------------------------------------------------
     # STEP 5: LLM call (Groq)
     # ---------------------------------------------------------
     llm = ChatGroq(
-        model="llama-3.1-8b-instant",
+        model=LLM_MODEL,
 
         api_key=GROQ_API_KEY,
 
         # Low temperature for factual, grounded answers
-        temperature=0.1
+        temperature=0.1,
+
     )
 
     # Build message list

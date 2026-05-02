@@ -15,7 +15,8 @@ from googleapiclient.http import MediaIoBaseDownload
 
 # OAuth scope: defines the level of access requested to the user's Google Drive
 # 'drive.readonly' allows the application to read files but not modify or delete them
-SCOPES = ['https://www.googleapis.com/auth/drive.readonly']
+# This has been modified to drive directlly so we can upload files
+SCOPES = ['https://www.googleapis.com/auth/drive']
 
 # Path to the OAuth client credentials downloaded from Google Cloud Console
 # This file contains the client_id and client_secret needed for OAuth authentication
@@ -139,6 +140,7 @@ def list_files_recursive(folder_id: str, path: str = "") -> list[dict]:
         - mimeType
         - path (full folder path)
         - format
+        - modifiedTime
     """
 
     # Import the dictionary containing supported MIME types
@@ -208,6 +210,9 @@ def list_files_recursive(folder_id: str, path: str = "") -> list[dict]:
             # Convert the MIME type into a simpler format label
             # Example: "application/pdf" -> "pdf"
             item['format'] = SUPPORTED_MIME_TYPES[item['mimeType']]
+
+            # Add modifiedTime for synchronization
+            item['modifiedTime'] = item.get('modifiedTime', '')
 
             # Store the file metadata in the result list
             all_files.append(item)

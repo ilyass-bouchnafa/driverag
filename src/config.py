@@ -14,6 +14,9 @@ CHROMA_PERSIST_DIR = os.getenv("CHROMA_PERSIST_DIR", "./chroma_db")
 CHUNK_SIZE = 1000
 CHUNK_OVERLAP = 200
 
+# ─── LLM ─────────────────────────────────────────────────
+LLM_MODEL = "llama-3.1-8b-instant"
+
 # ─── Embeddings ──────────────────────────────────────────
 # all-MiniLM-L6-v2: small (90MB), fast, very efficient
 EMBEDDING_MODEL = "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"

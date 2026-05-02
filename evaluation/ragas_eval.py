@@ -1,120 +1,208 @@
+# evaluation/ragas_eval.py
+import os
 import sys
+import json
 from pathlib import Path
 
-# === IMPORTANT : Ajouter la racine du projet pour les imports src.* ===
-root_dir = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(root_dir))
+ROOT = Path(__file__).parent.parent
+sys.path.insert(0, str(ROOT))
 
+from dotenv import load_dotenv
+load_dotenv(ROOT / ".env")
+
+GROQ_API_KEY = os.getenv("GROQ_API_KEY")
+if not GROQ_API_KEY:
+    print("❌ GROQ_API_KEY manquant dans .env")
+    sys.exit(1)
+
+print("=" * 60)
+print("RAGAS — Évaluation DriveRAG")
+print("=" * 60)
+
+# ── Imports RAGAS ────────────────────────────────────────
 from datasets import Dataset
 from ragas import evaluate
 from ragas.metrics import faithfulness, answer_relevancy
 
-# Wrappers Ragas
+# ── Groq via SDK direct (pas LangChain) ──────────────────
+from groq import Groq
+groq_client = Groq(api_key=GROQ_API_KEY)
+
+# ── Wrapper RAGAS-compatible pour Groq ───────────────────
+# RAGAS a besoin d'un objet avec une méthode .invoke()
+# On crée un wrapper minimal qui respecte cette interface
+
+from langchain_core.language_models.chat_models import BaseChatModel
+from langchain_core.messages import BaseMessage, AIMessage
+from langchain_core.outputs import ChatResult, ChatGeneration
+from typing import Any, List, Optional
+
+class GroqChatWrapper(BaseChatModel):
+    """
+    Wrapper minimal pour utiliser Groq avec RAGAS.
+    Implémente uniquement ce que RAGAS utilise.
+    """
+    model: str = "llama-3.1-8b-instant"
+    api_key: str = ""
+
+    @property
+    def _llm_type(self) -> str:
+        return "groq"
+
+    def _generate(
+        self,
+        messages: List[BaseMessage],
+        stop: Optional[List[str]] = None,
+        **kwargs: Any,
+    ) -> ChatResult:
+        # Convertir les messages LangChain → format Groq
+        groq_messages = []
+        for msg in messages:
+            role = "user"
+            if msg.type == "system":
+                role = "system"
+            elif msg.type == "ai":
+                role = "assistant"
+            groq_messages.append({"role": role, "content": msg.content})
+
+        # Appel Groq SDK
+        client = Groq(api_key=self.api_key)
+        response = client.chat.completions.create(
+            model=self.model,
+            messages=groq_messages,
+            temperature=0,
+            max_tokens=1024
+        )
+
+        content = response.choices[0].message.content
+        return ChatResult(
+            generations=[ChatGeneration(message=AIMessage(content=content))]
+        )
+
+
+# ── Embeddings via sentence-transformers ──────────────────
+from langchain_community.embeddings import HuggingFaceEmbeddings
 from ragas.llms import LangchainLLMWrapper
 from ragas.embeddings import LangchainEmbeddingsWrapper
 
-# LangChain
-from langchain_groq import ChatGroq
-from langchain_community.embeddings import HuggingFaceEmbeddings
+EMBEDDING_MODEL = os.getenv(
+    "EMBEDDING_MODEL",
+    "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
+)
 
-# Ton projet
-from src.generation.llm_chain import ask
-from src.retrieval.query_processor import advanced_retrieve
-from src.config import GROQ_API_KEY, RERANKER_MODEL   # optionnel
+print("1. Chargement du LLM Groq...")
+groq_llm = GroqChatWrapper(
+    model="llama-3.1-8b-instant",
+    api_key=GROQ_API_KEY
+)
+ragas_llm = LangchainLLMWrapper(groq_llm)
+
+print("2. Chargement des embeddings...")
+hf_embeddings = HuggingFaceEmbeddings(model_name=EMBEDDING_MODEL)
+ragas_embeddings = LangchainEmbeddingsWrapper(hf_embeddings)
+
+# Assigner aux métriques
+faithfulness.llm = ragas_llm
+answer_relevancy.llm = ragas_llm
+answer_relevancy.embeddings = ragas_embeddings
+
+# ── Import du pipeline RAG depuis src/ ───────────────────
+print("3. Import du pipeline RAG...")
+try:
+    from src.retrieval.query_processor import advanced_retrieve
+    from src.retrieval.reranker import rerank
+    from src.generation.llm_chain import ask
+    from src.config import TOP_K_RETRIEVAL, TOP_K_RERANKED
+except ImportError as e:
+    print(f"❌ Erreur import src/ : {e}")
+    print("Lance depuis la racine du projet : python evaluation/ragas_eval.py")
+    sys.exit(1)
+
+# ── Questions de test ─────────────────────────────────────
+try:
+    from evaluation.test_questions import TEST_QUESTIONS
+except ImportError:
+    print("⚠️  test_questions.py non trouvé — utilisation des questions par défaut")
+    TEST_QUESTIONS = [
+        "Qu'est-ce que la gestion de la mémoire ?",
+        "Comment fonctionne la pagination ?",
+        "Qu'est-ce que PL/SQL ?",
+    ]
 
 
 def run_evaluation():
-    """
-    Évaluation RAGAS sans OpenAI → Groq (LLM Judge) + HuggingFace Embeddings (local)
-    """
+    print(f"\n📋 {len(TEST_QUESTIONS)} questions de test")
+    print("─" * 60)
 
-    # ── Questions de test (à adapter avec de vraies questions précises sur TES documents) ──
-    test_questions = [
-        "Quelle est la définition principale de la gestion de mémoire ?",
-        "Quels sont les avantages de SGBD ?",
-        "C'est quoi une base de données ?",
-        "C'est quoi le traitement de l'image ?",
-        "Quel est le filtre adapté au bruit ?",
-        # Ajoute ici 5 à 10 questions plus spécifiques issues de tes PDFs
-    ]
+    answers, contexts = [], []
+    errors = []
 
-    print("=" * 70)
-    print("🚀 ÉVALUATION RAGAS - Groq + Embeddings locaux")
-    print(f"{len(test_questions)} questions de test")
-    print("=" * 70)
+    # Générer les réponses
+    print("\n4. Génération des réponses...")
+    for i, question in enumerate(TEST_QUESTIONS):
+        print(f"   [{i+1}/{len(TEST_QUESTIONS)}] {question[:55]}...")
+        try:
+            result = ask(question)
+            answers.append(result["answer"])
 
-    answers = []
-    contexts = []
+            candidates = advanced_retrieve(question, k=TOP_K_RETRIEVAL)
+            final_chunks = rerank(question, candidates, top_k=TOP_K_RERANKED)
+            contexts.append([c["text"] for c in final_chunks])
 
-    for i, q in enumerate(test_questions, 1):
-        print(f"\n[{i}/{len(test_questions)}] → {q}")
+            print(f"      ✅ OK")
+        except Exception as e:
+            print(f"      ❌ {e}")
+            errors.append(str(e))
+            answers.append("Erreur")
+            contexts.append(["Aucun contexte"])
 
-        # Récupérer la réponse via ton pipeline RAG
-        result = ask(q)
-        answers.append(result.get("answer") or result.get("content", "No answer"))
-
-        # Récupérer les contexts (top 5 chunks)
-        chunks = advanced_retrieve(q, k=5)
-        contexts.append([c.get("text", str(c)) for c in chunks])
-
-    # Créer le dataset Ragas
+    # Dataset RAGAS
+    print("\n5. Calcul des métriques RAGAS...")
     dataset = Dataset.from_dict({
-        "question": test_questions,
+        "question": TEST_QUESTIONS,
         "answer": answers,
-        "contexts": contexts
+        "contexts": contexts,
     })
 
-    # ===================== CONFIGURATION SANS OPENAI =====================
-    print("\n🔧 Configuration Groq (LLM Judge) + Embeddings locaux...")
+    try:
+        results = evaluate(
+            dataset,
+            metrics=[faithfulness, answer_relevancy],
+            raise_exceptions=False
+        )
+    except Exception as e:
+        print(f"❌ Erreur RAGAS : {e}")
+        return {}
 
-    # LLM Judge avec Groq (température 0 pour des évaluations stables)
-    judge_llm = ChatGroq(
-        model="llama-3.1-8b-instant",   # rapide et suffisant
-        api_key=GROQ_API_KEY,
-        temperature=0.0,
-    )
-    wrapped_llm = LangchainLLMWrapper(judge_llm)
+    faith = float(results["faithfulness"])
+    rel = float(results["answer_relevancy"])
 
-    # Embeddings légers et multilingues (compatible français)
-    embeddings = HuggingFaceEmbeddings(
-        model_name="sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"  # ~120 Mo
-        # Alternative encore plus légère : "sentence-transformers/all-MiniLM-L6-v2"
-    )
-    wrapped_embeddings = LangchainEmbeddingsWrapper(embeddings)
+    print("\n" + "=" * 60)
+    print("RÉSULTATS")
+    print("=" * 60)
+    print(f"  Faithfulness     : {faith:.3f} / 1.0  {'✅' if faith >= 0.8 else '⚠️'}")
+    print(f"  Answer Relevancy : {rel:.3f} / 1.0  {'✅' if rel >= 0.8 else '⚠️'}")
 
-    # Attacher les modèles aux métriques
-    faithfulness.llm = wrapped_llm
-    answer_relevancy.llm = wrapped_llm
-    answer_relevancy.embeddings = wrapped_embeddings
+    # Sauvegarder
+    output = {"faithfulness": faith, "answer_relevancy": rel, "errors": errors}
+    with open(ROOT / "evaluation" / "last_results.json", "w") as f:
+        json.dump(output, f, indent=2)
+    print("\n💾 Sauvegardé dans evaluation/last_results.json")
 
-    # ===================== LANCEMENT DE L'ÉVALUATION =====================
-    print("\n📊 Calcul des métriques en cours (Faithfulness + Answer Relevancy)...")
-
-    results = evaluate(
-        dataset=dataset,
-        metrics=[faithfulness, answer_relevancy],
-        llm=wrapped_llm,
-        embeddings=wrapped_embeddings,
-    )
-
-    # ===================== AFFICHAGE DES RÉSULTATS =====================
-    print("\n" + "=" * 70)
-    print("📈 RÉSULTATS DE L'ÉVALUATION")
-    print("=" * 70)
-    print(f"Faithfulness     : {results['faithfulness']:.3f} / 1.0")
-    print(f"Answer Relevancy : {results['answer_relevancy']:.3f} / 1.0")
-    print("=" * 70)
-
-    faith = results['faithfulness']
-    if faith >= 0.80:
-        print("✅ Excellent ! Ton RAG est très fidèle et pertinent.")
-    elif faith >= 0.65:
-        print("⚠️  Correct mais perfectible (améliore le prompt système, le chunking ou le reranking).")
-    else:
-        print("❌ Faithfulness faible → vérifie la qualité du retrieval et du prompt.")
-
-    return results
+    return output
 
 
 if __name__ == "__main__":
+    # Vérifier ChromaDB
+    try:
+        from src.retrieval.vectorstore import get_collection
+        count = get_collection().count()
+        if count == 0:
+            print("⚠️  ChromaDB vide — lance test_week1.py d'abord")
+            sys.exit(1)
+        print(f"✅ ChromaDB : {count} chunks")
+    except Exception as e:
+        print(f"❌ ChromaDB : {e}")
+        sys.exit(1)
+
     run_evaluation()

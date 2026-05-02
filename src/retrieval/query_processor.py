@@ -5,7 +5,7 @@ from langchain_groq import ChatGroq
 from langchain.schema import HumanMessage
 
 # Import project configuration
-from src.config import GROQ_API_KEY, MULTI_QUERY_COUNT
+from src.config import GROQ_API_KEY, LLM_MODEL, MULTI_QUERY_COUNT
 
 # Import hybrid search (used later in pipeline)
 from src.retrieval.hybrid_search import hybrid_search
@@ -43,7 +43,7 @@ def generate_multi_queries(question: str) -> list[str]:
     # ---------------------------------------------------------
     # Llama 3.1 is fast and free via Groq
     llm = ChatGroq(
-        model="llama-3.1-8b-instant",
+        model=LLM_MODEL,
 
         api_key=GROQ_API_KEY,
 
@@ -143,7 +143,7 @@ def generate_hyde_document(question: str) -> str:
     # STEP 1: Initialize the LLM (Groq)
     # ---------------------------------------------------------
     llm = ChatGroq(
-        model="llama-3.1-8b-instant",
+        model=LLM_MODEL,
         api_key=GROQ_API_KEY,
         temperature=0.1 #Low temperature → more factual and structured output
     )
