@@ -134,17 +134,12 @@ celerybeat.pid
 # SageMath parsed files
 *.sage.py
 
-# Environments
+# ============================================================================
+# Environment Variables (NEVER commit API keys/secrets!)
+# ============================================================================
 .env
 .envrc
 .venv
-.venv-ragas
-env/
-venv/
-ENV/
-env.bak/
-venv.bak/
-venv-ragas/
 
 # Spyder project settings
 .spyderproject
@@ -209,23 +204,82 @@ marimo/_lsp/
 __marimo__/
 
 
-# Environment variables (NEVER commit API keys!)
-.env
+# ============================================================================
+# API Keys & Sensitive Files (NEVER commit credentials!)
+# ============================================================================
+credentials/
+credentials.json
+credentials.json.enc
+token.pickle
+.credentials
+secrets.json
 
-# Google credentials (NEVER commit sensitive files!)
-credentials/token.pickle
-credentials/credentials.json
-
-# ChromaDB database (too large for GitHub and auto-generated)
-chroma_db/
-
-# Python virtual environment
+# ============================================================================
+# Python Virtual Environments
+# ============================================================================
 venv/
+venv-ragas/
+env/
+ENV/
+env.bak/
+venv.bak/
 
-# Python cache files (compiled bytecode)
+# ============================================================================
+# Python Cache & Compiled Files
+# ============================================================================
 __pycache__/
 *.pyc
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+dist/
+build/
 
-# System files (OS-generated, not needed)
+# ============================================================================
+# Databases (auto-generated, too large)
+# ============================================================================
+chroma_db/
+*.sqlite3
+*.sqlite3-journal
+db.sqlite3
+
+# ============================================================================
+# React / Node.js / Frontend
+# ============================================================================
+frontend/node_modules/
+node_modules/
+dist/
+build/
+.vite/
+.next/
+coverage/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# ============================================================================
+# Logs & Temporary Files
+# ============================================================================
+*.log
+logs/
+.pytest_cache/
+.tox/
+htmlcov/
+
+# ============================================================================
+# System & IDE Files
+# ============================================================================
 .DS_Store
 Thumbs.db
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# ============================================================================
+# Backend/Build Outputs
+# ============================================================================
+backend/__pycache__/
+backend/*.pyc
