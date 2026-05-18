@@ -308,6 +308,11 @@ def start_auto_sync(interval_seconds: int = 300):
         logger.info(f"🤖 Auto-sync started (interval={interval_seconds}s)")
 
         while _auto_sync_running:
+            time.sleep(interval_seconds)
+
+            if not _auto_sync_running:
+                break
+
             try:
                 logger.info("🔄 Auto-sync running...")
 
@@ -320,8 +325,7 @@ def start_auto_sync(interval_seconds: int = 300):
                 logger.error(f"❌ Auto-sync error: {e}")
                 _last_sync_result = {"error": str(e)}
 
-            # Wait before next sync
-            time.sleep(interval_seconds)
+            
 
     # ---------------------------------------------------------
     # START THREAD

@@ -1,0 +1,83 @@
+/* ═══════════════════════════════════════════════════
+   DriveRAG — Global Styles
+   Aesthetic: Light luxury / cursor glow effect
+═══════════════════════════════════════════════════ */
+
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+:root {
+  --bg:          #ffffff;
+  --surface:     #ffffff;
+  --surface-2:   #f6f7ff;
+  --surface-3:   #eeeffe;
+  --border:      rgba(79,70,229,0.1);
+  --border-hi:   rgba(79,70,229,0.18);
+
+  --text:        #0f0f1a;
+  --text-2:      #6b6b80;
+  --text-3:      #b0b0c8;
+
+  --accent:      #4f46e5;
+  --accent-2:    #6d64f0;
+  --accent-glow: rgba(79,70,229,0.12);
+
+  --green:       #16a34a;
+  --red:         #dc2626;
+  --amber:       #d97706;
+
+  --font-display: 'Syne', sans-serif;
+  --font-body:    'DM Sans', sans-serif;
+}
+
+html, body, #root {
+  height: 100%;
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--font-body);
+  font-size: 15px;
+  line-height: 1.6;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* Cursor glow — updated via JS */
+body::before {
+  content: '';
+  position: fixed;
+  top: 0; left: 0;
+  width: 100%; height: 100%;
+  background: radial-gradient(
+    600px circle at var(--cx, 50%) var(--cy, 50%),
+    rgba(79, 70, 229, 0.07) 0%,
+    rgba(99, 102, 241, 0.04) 35%,
+    transparent 70%
+  );
+  pointer-events: none;
+  z-index: 0;
+  transition: background 0.1s ease;
+}
+
+/* Subtle blue tint at the very bottom */
+body::after {
+  content: '';
+  position: fixed;
+  bottom: 0; left: 0; right: 0;
+  height: 220px;
+  background: linear-gradient(
+    to top,
+    rgba(79, 70, 229, 0.06) 0%,
+    transparent 100%
+  );
+  pointer-events: none;
+  z-index: 0;
+}
+
+/* Everything above the bg effects */
+#root { position: relative; z-index: 1; }
+
+::-webkit-scrollbar { width: 4px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: var(--border-hi); border-radius: 2px; }
+
+::selection { background: var(--accent-glow); color: var(--accent); }
+
+button { cursor: pointer; font-family: var(--font-body); }
