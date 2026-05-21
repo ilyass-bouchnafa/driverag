@@ -30,7 +30,7 @@ def get_embedder() -> SentenceTransformer:
     global _model
     if _model is None:
         # Load the model only once and print a message
-        print(f"🤖 Chargement embedder : {EMBEDDING_MODEL}")
+        print(f"🤖 Loading embedder: {EMBEDDING_MODEL}")
         _model = SentenceTransformer(EMBEDDING_MODEL)
     return _model
 

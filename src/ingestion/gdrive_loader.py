@@ -1,30 +1,55 @@
+"""
+gdrive_loader.py
+-----------------
+Utilities to authenticate with Google Drive and to list/download
+supported files from a designated Drive folder. This module centralizes
+the Drive OAuth flow and provides helpers used by the ingestion
+and synchronization pipeline.
+
+Notes for contributors:
+- Add your Google API client secret to `credentials/credentials.json`.
+- The OAuth flow will create `credentials/token.pickle` on first run.
+- Do NOT commit credential files to the repository.
+"""
+
 import io
+import logging
 import os
 import pickle
 
 # Used to send HTTP requests when refreshing expired OAuth tokens
 from google.auth.transport.requests import Request
 
-# Handles the OAuth2 authorization flow for installes applications
+# Handles the OAuth2 authorization flow for installed applications
 from google_auth_oauthlib.flow import InstalledAppFlow
 
 # Used to construct a resource object for interacting with Google APIs
 from googleapiclient.discovery import build
 
+logger = logging.getLogger(__name__)
+
 from googleapiclient.http import MediaIoBaseDownload
 
-# OAuth scope: defines the level of access requested to the user's Google Drive
-# 'drive.readonly' allows the application to read files but not modify or delete them
-# This has been modified to drive directlly so we can upload files
+# OAuth scopes define the permissions requested from the user. Use
+# 'https://www.googleapis.com/auth/drive' for full read/write access.
+# For read-only use 'https://www.googleapis.com/auth/drive.readonly'.
 SCOPES = ['https://www.googleapis.com/auth/drive']
 
-# Path to the OAuth client credentials downloaded from Google Cloud Console
-# This file contains the client_id and client_secret needed for OAuth authentication
-CREDENTIALS_FILE = 'credentials/credentials.json'
+# ====================== FIXED PATHS (current structure) ======================
+import os
+from pathlib import Path
 
-# Path where the user's access and refresh tokens will be stored locally
-# This allows the application to reuse the authentication without asking the user again
-TOKEN_FILE = 'credentials/token.pickle'
+# Compute the project root path (C:\driverag)
+ROOT_DIR = Path(__file__).resolve().parent.parent.parent
+
+# Paths to local credential files used by the OAuth flow.
+# Keep these files out of version control and share them securely.
+CREDENTIALS_FILE = str(ROOT_DIR / "credentials" / "credentials.json")
+TOKEN_FILE = str(ROOT_DIR / "credentials" / "token.pickle")
+
+logger.info(f"Credentials path: {CREDENTIALS_FILE}")
+logger.info(f"Token path: {TOKEN_FILE}")
+# ================================================================================
 
 def get_drive_service():
     """
@@ -74,31 +99,35 @@ def get_drive_service():
         # Case 1: Credentials exist but have expired
         # If a refresh token is available, we can request a new access token
         if creds and creds.expired and creds.refresh_token:
+            try:
+                creds.refresh(Request())
+            except Exception as e:
+                logger.warning(
+                    "Google Drive refresh token failed; deleting stale token and reauthenticating: %s",
+                    e
+                )
+                creds = None
+                if os.path.exists(TOKEN_FILE):
+                    os.remove(TOKEN_FILE)
 
-            # Send a refresh request to Google's OAuth server
-            # This avoids requiring the user to log in again
-            creds.refresh(Request())
-        
         # Case 2: No credentials exist (first run)
         # or the credentials cannot be refreshed
-        else:
+        if not creds or not creds.valid:
+            if not os.path.exists(CREDENTIALS_FILE):
+                raise FileNotFoundError(
+                    f"Google credentials file not found: {CREDENTIALS_FILE}. "
+                    "Place your client secrets there."
+                )
 
-            # Create an OAuth authorization flow using the client credentials file
-            # This file was downloaded from Google Cloud Console
             flow = InstalledAppFlow.from_client_secrets_file(
                 CREDENTIALS_FILE,
                 SCOPES
             )
-
-            # Launch a temporary local web server that handles the OAuth callback
-            # A browser window will open where the user logs in and grants access
             creds = flow.run_local_server(port=0)
 
         # ---------------------------------------------------------
         # STEP 3: Save the new credentials for future executions
         # ---------------------------------------------------------
-        # The credentials object is serialized and stored locally
-        # so that the user does not need to authenticate again
         with open(TOKEN_FILE, 'wb') as token:
             pickle.dump(creds, token)
     
@@ -190,8 +219,8 @@ def list_files_recursive(folder_id: str, path: str = "") -> list[dict]:
         # -------------------------------------------------------
         if item['mimeType'] == 'application/vnd.google-apps.folder':
 
-            # Display the folder being explored (useful for debugging)
-            print(f"Exploring folder: {item_path}")
+            # Log the folder being explored (useful for debugging)
+            logger.info(f"Exploring folder: {item_path}")
 
             # Recursively explore the subfolder
             sub_files = list_files_recursive(item['id'], item_path)
@@ -221,9 +250,9 @@ def list_files_recursive(folder_id: str, path: str = "") -> list[dict]:
         # Case 3: Unsupported file format
         # -------------------------------------------------------
         else:
-            print(
-                f"Unsupported format ignored: "
-                f"{item['name']} ({item['mimeType']})"
+            # Unsupported file types are intentionally skipped
+            logger.warning(
+                f"Unsupported format ignored: {item['name']} ({item['mimeType']})"
             )
 
     # Return the list of all supported files discovered in the folder tree        
@@ -276,9 +305,8 @@ def download_file(file_id: str, file_name: str, mime_type: str) -> bytes:
     # This service allows access to file download endpoints
     service = get_drive_service()
 
-    # Display the current file being downloaded
-    # Useful for monitoring execution progress
-    print(f"⬇️  Downloading file: {file_name}")
+    # Log the current file being downloaded (helps when running sync)
+    logger.info(f"⬇️  Downloading file: {file_name}")
     
 
     # ---------------------------------------------------------

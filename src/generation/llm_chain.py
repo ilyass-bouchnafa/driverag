@@ -38,18 +38,24 @@ STRICT RULES - FOLLOW THEM ALL WITHOUT EXCEPTION:
 3. For every important statement, claim, definition, or explanation, you MUST cite the exact source immediately after the sentence using this format: [File Name, Page X].
    Example: A filter is an operation that modifies an image using a kernel. [Chapitre I-II_Pr AMINE.pdf, Page 65]
 
-4. If the answer (or any part of it) cannot be directly found or supported in the provided documents, respond **EXACTLY** with this sentence and add absolutely nothing else:
+4. If the answer (or ANY part of it) cannot be directly found word-for-word in the provided documents, respond EXACTLY with this single sentence and NOTHING else:
    "I cannot find this information in the provided documents."
-
+   - NEVER add explanations, suggestions, or partial answers after this sentence.
+   - NEVER say "however I can tell you..." or "but from general knowledge..."
+   - NEVER invent document names, file names, or page numbers.
+   - If a file name does not appear literally in the DOCUMENTS section, it does NOT exist.
+   
 5. PREVIOUS MESSAGES HANDLING:
    - If any previous assistant message starts with "[STRONG RESTRICTION:", it means this message comes from Direct LLM mode.
      → You MUST completely IGNORE that entire message.
      → Do NOT use any facts, explanations, or ideas from it.
 
-6. NEVER invent, extrapolate, add extra details, or over-explain. Stick strictly to what the question asks and what the documents provide.
+6. NEVER invent, extrapolate, add extra details, or over-explain.
+   NEVER fabricate document titles or file names — only cite sources that literally appear in the provided DOCUMENTS section.
 7. NEVER cite a source that does not explicitly appear in the provided documents.
 8. Use clear, formal, precise, and academic language. Be concise and direct. Avoid unnecessary repetitions and conclusions.
 9. RESPONSE LENGTH: Match the response length to the complexity of the question. Simple questions deserve short answers. Never pad responses with redundant information.
+10. Always respond in the SAME language as the user's question.
 
 Always prioritize precision, conciseness, and strict fidelity to the user's question and the source documents.
 """
@@ -60,25 +66,26 @@ Always prioritize precision, conciseness, and strict fidelity to the user's ques
 _history = []
 
 def format_context(chunks: list[dict]) -> str:
+    """Format a list of chunk dictionaries into a single prompt-ready string.
+
+    Each chunk is represented with a header containing its source and page,
+    followed by the chunk text. Chunks are separated by a visual divider.
+
+    Args:
+        chunks: List of chunk dictionaries, each containing a "metadata" key
+            with `source` and `page`, and a `text` field.
+
+    Returns:
+        A single string containing all chunks formatted for the LLM prompt.
     """
-    Format retrieved chunks into a structured context string.
 
-    Each chunk includes:
-    - Source file name
-    - Page number
-    - Chunk text
-
-    This helps the LLM cite sources correctly.
-    """
-
+    separator = "\n\n" + "─" * 40 + "\n\n"
     parts = []
     for chunk in chunks:
         meta = chunk["metadata"]
         parts.append(f"[{meta['source']}, Page {meta['page']}]\n{chunk['text']}")
+    return separator.join(parts)
     
-    # Add visual separators between chunks
-    return "\n\n" + "─" * 40 + "\n\n".join(parts)
-
 @traceable(run_type="chain", name="RAG Query")
 def ask(question: str, external_history: list = None, thread_id: str = None, conversation_id: str = None, langsmith_extra: dict = None) -> dict:
     """
@@ -97,7 +104,7 @@ def ask(question: str, external_history: list = None, thread_id: str = None, con
         User query
     
     external_history : list
-        liste de langchain.schema messages (optionnel)
+        Optional list of `langchain` message objects to include as conversation history.
 
     Returns
     -------
@@ -191,7 +198,13 @@ def ask(question: str, external_history: list = None, thread_id: str = None, con
                 "score": round(chunk.get("rerank_score", chunk.get("score", 0)), 3)
             })
 
-    return {"answer": response.content, "sources": sources}
+    raw_contexts = [chunk["text"] for chunk in final_chunks]
+
+    return {
+        "answer": response.content, 
+        "sources": sources,
+        "raw_contexts": raw_contexts  # <--- Indispensable pour l'évaluation !
+    }
 
 def clear_memory():
     """
@@ -201,3 +214,26 @@ def clear_memory():
 
     global _history
     _history.clear()
+
+def _call_llm_with_chunks(question: str, chunks: list[dict]) -> str:
+    """Call the LLM using pre-built document chunks.
+
+    This helper formats the provided chunks into the prompt context, builds
+    the message list and invokes the ChatGroq model returning the generated
+    content string.
+
+    Args:
+        question: The user question to send to the LLM.
+        chunks: A list of chunk dictionaries (same format used in RAG pipeline).
+
+    Returns:
+        The text content returned by the LLM invocation.
+    """
+
+    context = format_context(chunks)
+    llm = ChatGroq(model=LLM_MODEL, api_key=GROQ_API_KEY, temperature=0.1)
+    messages = [
+        SystemMessage(content=SYSTEM_PROMPT),
+        HumanMessage(content=f"DOCUMENTS :\n{context}\n\nQUESTION : {question}")
+    ]
+    return llm.invoke(messages).content

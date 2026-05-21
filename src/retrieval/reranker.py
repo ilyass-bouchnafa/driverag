@@ -92,6 +92,14 @@ def rerank(question: str, chunks: list[dict], top_k: int = TOP_K_RERANKED) -> li
     # ---------------------------------------------------------
     # STEP 6: Sort by rerank score (descending)
     # ---------------------------------------------------------
-    reranker = sorted(chunks, key=lambda x: x["rerank_score"], reverse=True)
+    # Sort and apply a lightweight quality filter
+    sorted_chunks = sorted(chunks, key=lambda x: x.get("rerank_score", 0), reverse=True)
 
-    return reranker[:top_k]
+    # Keep chunks with a reasonable reranker score (> -5.0) as a simple quality threshold
+    good_chunks = [c for c in sorted_chunks if c.get("rerank_score", 0) > -5.0]
+
+    # If the quality filter removes everything, fall back to the top results to guarantee output
+    if not good_chunks:
+        good_chunks = sorted_chunks[:top_k]
+
+    return good_chunks[:top_k]

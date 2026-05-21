@@ -118,7 +118,7 @@ def extract_text_from_bytes(file_bytes: bytes, file_name: str, file_format: str)
                 if doc.page_content.strip():
 
                     pages.append({
-                        "text": doc.page_content.split(),
+                        "text": doc.page_content.strip(),
 
                         # Simulated page numbering using section index
                         "page": i + 1,
@@ -171,7 +171,7 @@ def extract_text_from_bytes(file_bytes: bytes, file_name: str, file_format: str)
                 if doc.page_content.strip():
 
                     pages.append({
-                        "text": doc.page_content.split(),
+                        "text": doc.page_content.strip(),
 
                         # Slide numbering starts at 1
                         "page": i + 1,

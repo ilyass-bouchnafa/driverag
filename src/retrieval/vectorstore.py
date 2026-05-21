@@ -144,7 +144,11 @@ def add_chunks_to_store(chunks: list[dict], summaries: dict[str, str] = None):
         embeddings=embeddings
     )
 
-    print(f"✅ {len(chunks)} chunks indexés dans ChromaDB")
+    print(f"✅ {len(chunks)} chunks indexed in ChromaDB")
+
+    # Also synchronize chunks to Redis to speed up BM25 retrieval
+    from src.retrieval.redis_corpus import save_chunks_to_redis
+    save_chunks_to_redis(chunks)
 
 
 
@@ -325,6 +329,11 @@ def delete_chunks_by_source(source_name: str):
             key for key in _doc_store
             if key.startswith(source_name)
         ]
+
+        # Remove matching entries from the in-memory store and Redis
+        from src.retrieval.redis_corpus import delete_chunks_by_source_redis
+        if keys_to_delete:
+            delete_chunks_by_source_redis(source_name)
 
         for key in keys_to_delete:
             del _doc_store[key]

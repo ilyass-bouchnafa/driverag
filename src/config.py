@@ -10,6 +10,10 @@ GOOGLE_DRIVE_FOLDER_ID = os.getenv("GOOGLE_DRIVE_FOLDER_ID")
 # ─── ChromaDB ────────────────────────────────────────────
 CHROMA_PERSIST_DIR = os.getenv("CHROMA_PERSIST_DIR", "./chroma_db")
 
+# ─── Redis ───────────────────────────────────────────────
+REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379/0")
+REDIS_CACHE_TTL = 3600 * 24 * 7   # 7 jours par défaut
+
 # ─── Chunking ────────────────────────────────────────────
 CHUNK_SIZE = 1000
 CHUNK_OVERLAP = 200
@@ -22,14 +26,14 @@ LLM_MODEL = "llama-3.1-8b-instant"
 EMBEDDING_MODEL = "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
 
 # ─── Reranking ───────────────────────────────────────────
-# cross-encoder/ms-marco-MiniLM-L-6-v2: lightweight, free
-RERANKER_MODEL = "cross-encoder/ms-marco-MiniLM-L-6-v2"
+# cross-encoder/ms-marco-MiniLM-L-12-v2: lightweight, free
+RERANKER_MODEL = "cross-encoder/mmarco-mMiniLMv2-L12-H384-v1"
 #RERANKER_MODEL = "mixedbread-ai/mxbai-rerank-large-v2"
 
-# ─── Retrieval ───────────────────────────────────────────
-TOP_K_RETRIEVAL = 10   # Number of chunks retrieved by Hybrid Search
-TOP_K_RERANKED = 5     # Number of chunks kept after reranking
-HYBRID_ALPHA = 0.5     # 0 = pure BM25, 1 = pure dense, 0.5 = balanced
+# ─── Retrieval ───────────────────────────────────────────────
+TOP_K_RETRIEVAL = 30   # Number of chunks retrieved by Hybrid Search
+TOP_K_RERANKED = 10     # Number of chunks kept after reranking
+HYBRID_ALPHA = 0.65     # 0 = pure BM25, 1 = pure dense, 0.5 = balanced
 
 # ─── Multi-query ─────────────────────────────────────────
 MULTI_QUERY_COUNT = 3  # Number of query reformulations

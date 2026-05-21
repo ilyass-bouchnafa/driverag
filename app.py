@@ -45,7 +45,7 @@ def init_session_state():
             st.session_state[key] = default_value
     
     if not st.session_state.auto_sync_started:
-        start_auto_sync(interval_seconds=300)
+        start_auto_sync(interval_seconds=1800)
         st.session_state.auto_sync_started = True
 
 

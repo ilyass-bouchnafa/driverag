@@ -280,6 +280,6 @@ def advanced_retrieve(question: str, k: int = 10) -> list[dict]:
     # ---------------------------------------------------------
     # STEP 6: Logging
     # ---------------------------------------------------------
-    print(f"🔍 Advanced Retrieve : {len(top_chunks)} chunks uniques fusionnés")
+    print(f"🔍 Advanced Retrieve: {len(top_chunks)} unique chunks merged")
 
     return top_chunks

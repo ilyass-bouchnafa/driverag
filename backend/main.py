@@ -14,8 +14,10 @@ import time
 from pathlib import Path
 
 # Force ffmpeg - cherche dans tous les endroits possibles
-os.environ["PATH"] = r"C:\ffmpeg-8.1\bin" + os.pathsep + os.environ.get("PATH", "")
-
+ffmpeg_path = r"C:\ffmpeg-8.1\bin"
+if os.path.exists(ffmpeg_path):
+    os.environ["PATH"] = ffmpeg_path + os.pathsep + os.environ.get("PATH", "")
+    
 # Point Python at the project root so src.* imports work
 ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(ROOT))
@@ -26,7 +28,7 @@ from src.retrieval.vectorstore import get_indexed_files, add_chunks_to_store
 from src.ingestion.gdrive_loader import list_files_recursive, download_file
 from src.ingestion.file_router import extract_text_from_bytes
 from src.ingestion.chunker import chunk_pages
-from src.ingestion.sync_manager import start_auto_sync, get_auto_sync_status
+from src.ingestion.sync_manager import start_auto_sync, get_auto_sync_status, smart_sync
 from src.config import GOOGLE_DRIVE_FOLDER_ID
 
 app = FastAPI(title="DriveRAG API", version="1.0.0")
@@ -58,20 +60,43 @@ class SyncResponse(BaseModel):
 
 @app.on_event("startup")
 def startup_event():
-    start_auto_sync(interval_seconds=300)
+    """FastAPI startup event: start background auto-sync.
+
+    This hooks into application startup to kick off the periodic
+    synchronization with Google Drive (non-blocking).
+    """
+
+    start_auto_sync(interval_seconds=1800)
 
 
 @app.get("/health")
 def health():
+    """Health check endpoint.
+
+    Returns basic status information including sync state, number of
+    indexed files and Redis statistics to help monitoring the service.
+    """
+
+    from src.retrieval.redis_corpus import get_redis_stats
     return {
         "status": "ok",
         "sync": get_auto_sync_status(),
         "indexed_files": len(get_indexed_files()),
+        "redis": get_redis_stats(),
     }
 
 
 @app.post("/chat")
 async def chat(req: ChatRequest):
+    """Handle chat requests from the frontend.
+
+    Supports two modes:
+        - "rag": Retrieval-Augmented Generation using indexed documents
+        - "direct": Direct LLM mode (no document grounding)
+
+    The request is converted to the expected internal format and dispatched
+    to the appropriate handler in `src.generation`.
+    """
     thread_id = req.thread_id or str(uuid.uuid4())
     conversation_id = req.conversation_id or f"conv_{int(time.time())}"
     try:
@@ -101,35 +126,40 @@ async def chat(req: ChatRequest):
 
 @app.get("/files")
 def get_files():
+    """Return the list of indexed files available in the vector store."""
+
     return get_indexed_files()
 
 
 @app.post("/sync", response_model=SyncResponse)
 async def sync_drive():
+    """Trigger a manual sync with Google Drive and return sync stats.
+
+    Calls the same logic as the automatic sync but exposes it via API.
+    """
+
     try:
         files = list_files_recursive(GOOGLE_DRIVE_FOLDER_ID)
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Drive error: {e}")
-    synced, errors, names = 0, 0, []
-    for f in files:
-        try:
-            file_bytes = download_file(f["id"], f["name"], f["mimeType"])
-            pages = extract_text_from_bytes(file_bytes, f["name"], f["format"])
-            for page in pages:
-                page["drive_path"] = f["path"]
-                page["file_format"] = f["format"]
-                page["drive_modified_time"] = f.get("modifiedTime", "")
-            chunks = chunk_pages(pages)
-            add_chunks_to_store(chunks)
-            synced += 1
-            names.append(f["name"])
-        except Exception:
-            errors += 1
-    return SyncResponse(synced=synced, errors=errors, files=names)
+
+    stats = smart_sync()
+    names = [f["name"] for f in files]
+    return SyncResponse(
+        synced=stats.get("new", 0) + stats.get("updated", 0),
+        errors=len(stats.get("errors", [])),
+        files=names,
+    )
 
 
 @app.post("/upload")
 async def upload_file(file: UploadFile = File(...)):
+    """Upload a file from the frontend and ingest it into the corpus.
+
+    Validates the file extension, uploads the file to Drive and ingests
+    the resulting pages/chunks into the vector store.
+    """
+
     try:
         from src.ingestion.drive_uploader import upload_and_ingest
         file_bytes = await file.read()
@@ -138,7 +168,7 @@ async def upload_file(file: UploadFile = File(...)):
         ALLOWED = {".pdf", ".docx", ".txt", ".md", ".pptx"}
         if file_extension not in ALLOWED:
             raise HTTPException(status_code=400,
-                detail=f"Format non supporté : {file_extension}. Acceptés : {', '.join(ALLOWED)}")
+                detail=f"Unsupported format: {file_extension}. Accepted: {', '.join(ALLOWED)}")
         result = upload_and_ingest(file_bytes, file_name, file_extension)
         if result.get("error") and not result.get("upload"):
             raise HTTPException(status_code=500, detail=result["error"])
@@ -158,6 +188,8 @@ async def upload_file(file: UploadFile = File(...)):
 
 @app.post("/clear")
 def clear_conversation():
+    """Clear the in-memory conversation history (development utility)."""
+
     try:
         clear_memory()
         return {"status": "cleared"}
@@ -167,10 +199,13 @@ def clear_conversation():
 
 @app.post("/transcribe")
 async def transcribe(audio: UploadFile = File(...)):
+    """Receive an audio file, run Whisper transcription, and return text."""
+
     import whisper, traceback
     data = await audio.read()
     print(f"Received audio: {len(data)} bytes")
-    tmp_path = os.path.join(os.environ.get("TEMP", "C:\\Windows\\Temp"), f"audio_{int(time.time())}.webm")
+    import tempfile
+    tmp_path = os.path.join(tempfile.gettempdir(), f"audio_{int(time.time())}.webm")
     with open(tmp_path, "wb") as f:
         f.write(data)
     print(f"Saved to: {tmp_path}, exists: {os.path.exists(tmp_path)}")

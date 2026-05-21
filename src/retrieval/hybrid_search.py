@@ -3,6 +3,7 @@ from rank_bm25 import BM25Okapi
 
 # Import dense semantic search and full corpus access
 from src.retrieval.vectorstore import dense_search, get_all_chunks
+from src.retrieval.redis_corpus import get_all_chunks_from_redis, REDIS_AVAILABLE
 
 # Import configuration parameters
 from src.config import TOP_K_RETRIEVAL, HYBRID_ALPHA
@@ -41,7 +42,14 @@ def hybrid_search(query: str, k: int = TOP_K_RETRIEVAL, alpha: float = HYBRID_AL
     # STEP 1: Load all indexed chunks
     # ---------------------------------------------------------
     # Required for BM25 because it needs the full corpus
-    all_chunks = get_all_chunks()
+    # Use Redis if available (much faster than ChromaDB)
+    if REDIS_AVAILABLE:
+        all_chunks = get_all_chunks_from_redis()
+        if not all_chunks:
+            # Fall back to ChromaDB if Redis is empty
+            all_chunks = get_all_chunks()
+    else:
+        all_chunks = get_all_chunks()
 
     # If no data is available, return empty list
     if not all_chunks:

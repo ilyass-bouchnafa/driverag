@@ -92,6 +92,9 @@ def get_indexed_file_timestamps() -> dict[str, str]:
             "file1.pdf": "2024-01-01T10:00:00",
             "file2.docx": "2024-01-02T12:00:00"
         }
+    
+    Note: Returns files WITHOUT drive_modified_time as empty string
+    to trigger re-indexing once (migration of old chunks)
     """
 
     try:
@@ -109,14 +112,18 @@ def get_indexed_file_timestamps() -> dict[str, str]:
             metadata = chunk.get("metadata", {})
 
             source = metadata.get("source")
-            mod_time = metadata.get("drive_modified_time")
+            mod_time = metadata.get("drive_modified_time", "")
 
             # -------------------------------------------------
             # STEP 3: Store only one entry per file
+            # Important: store "" for files without timestamp
+            # This triggers ONE re-index for old chunks
             # -------------------------------------------------
-            if source and mod_time and source not in timestamps:
+            if source and source not in timestamps:
                 timestamps[source] = mod_time
 
+        logger.info(f"📊 Retrieved {len(timestamps)} indexed files from ChromaDB")
+        
         return timestamps
 
     except Exception as e:
@@ -171,6 +178,10 @@ def smart_sync(force_all: bool = False) -> dict:
     indexed_files = {} if force_all else get_indexed_file_timestamps()
 
     logger.info(f"📊 Indexed files: {len(indexed_files)}")
+    if indexed_files:
+        logger.debug(f"   Indexed timestamps: {indexed_files}")
+    else:
+        logger.warning("⚠️  No indexed file timestamps found - will re-index all files")
 
     # ---------------------------------------------------------
     # STEP 2: Retrieve files from Google Drive
@@ -197,16 +208,29 @@ def smart_sync(force_all: bool = False) -> dict:
         # -----------------------------------------------------
         if file_name in indexed_files:
 
-            # Case 1: Unchanged file
-            if indexed_files[file_name] == drive_mod_time and not force_all:
-                stats["skipped"] += 1
-                continue
-
-            # Case 2: Modified file
-            logger.info(f"🔄 Updated file: {file_name}")
-
+            stored_timestamp = indexed_files[file_name]
+            
+            # Case 1: File with timestamp → Compare strictly
+            if stored_timestamp:  # Non-empty timestamp
+                if stored_timestamp == drive_mod_time and not force_all:
+                    logger.debug(f"   ✓ Unchanged: {file_name}")
+                    logger.debug(f"      Stored: {stored_timestamp}")
+                    logger.debug(f"      Drive:  {drive_mod_time}")
+                    stats["skipped"] += 1
+                    continue
+                else:
+                    # Modified file
+                    logger.info(f"🔄 Updated file: {file_name}")
+                    logger.debug(f"   Stored: {stored_timestamp}")
+                    logger.debug(f"   Drive:  {drive_mod_time}")
+                    action = "updated"
+            
+            # Case 2: File without timestamp (old chunk) → Re-index once
+            else:
+                logger.info(f"⚡ Migrating old chunk: {file_name} (adding timestamp)")
+                action = "updated"
+            
             delete_chunks_by_source(file_name)
-            action = "updated"
 
         else:
             # Case 3: New file
@@ -275,7 +299,7 @@ _last_sync_result = None
 _last_sync_time = None
 
 
-def start_auto_sync(interval_seconds: int = 300):
+def start_auto_sync(interval_seconds: int = 1800):
     """
     Start automatic synchronization in the background.
 
@@ -288,7 +312,7 @@ def start_auto_sync(interval_seconds: int = 300):
     Parameters
     ----------
     interval_seconds : int
-        Time between sync runs (default: 300s = 5 minutes)
+        Time between sync runs (default: 1800s = 30 minutes)
     """
 
     global _auto_sync_running, _auto_sync_thread

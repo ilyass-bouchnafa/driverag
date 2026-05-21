@@ -16,7 +16,7 @@ function useCursorGlow() {
   }, []);
 }
 
-const SYNC_INTERVAL = 300; // seconds
+const SYNC_INTERVAL = 1800; // seconds (30 minutes)
 
 function useCountdown(total) {
   const [count, setCount] = useState(total);

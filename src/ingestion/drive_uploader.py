@@ -34,10 +34,10 @@ def upload_file_to_drive(
     media = MediaIoBaseUpload(
         io.BytesIO(file_bytes),
         mimetype=mime_type,
-        resumable=True    # Permet les gros fichiers
+        resumable=True    # Allows large file uploads
     )
 
-    logger.info(f"Upload Drive : {file_name} ({mime_type})")
+    logger.info(f"Drive upload: {file_name} ({mime_type})")
 
     uploaded = service.files().create(
         body=file_metadata,
@@ -45,7 +45,7 @@ def upload_file_to_drive(
         fields="id, name, webViewLink"
     ).execute()
 
-    logger.info(f"✅ Uploadé : {uploaded['name']} (id: {uploaded['id']})")
+    logger.info(f"✅ Uploaded: {uploaded['name']} (id: {uploaded['id']})")
     return uploaded
 
 def upload_and_ingest(
@@ -63,9 +63,9 @@ def upload_and_ingest(
     try:
         uploaded = upload_file_to_drive(file_bytes, file_name, file_extension)
         result["upload"] = uploaded
-        logger.info(f"Drive upload OK : {uploaded['name']}")
+        logger.info(f"Drive upload OK: {uploaded['name']}")
     except Exception as e:
-        result["error"] = f"Erreur upload Drive : {str(e)}"
+        result["error"] = f"Drive upload error: {str(e)}"
         logger.error(result["error"])
         return result
     
@@ -80,10 +80,10 @@ def upload_and_ingest(
         chunks = chunk_pages(pages)
         add_chunks_to_store(chunks)
         result["chunks"] = len(chunks)
-        logger.info(f"Ingestion OK : {len(chunks)} chunks")
+        logger.info(f"Ingestion OK: {len(chunks)} chunks")
     
     except Exception as e:
-        result["error"] = f"Upload OK mais erreur ingestion : {str(e)}"
+        result["error"] = f"Upload OK but ingestion error: {str(e)}"
         logger.warning(result["error"])
 
     return result

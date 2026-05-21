@@ -13,10 +13,21 @@ Answer in a clear, structured, and precise way in French.
 You can use your general knowledge to answer.
 You can refer to previous messages in the conversation normally.
 If you are not sure about something, say it clearly.
+NEVER use citation formats like [File Name, Page X] — there are no source documents in this mode.
+NEVER reference files, documents, or pages — answer from general knowledge only.
 """
 
 @traceable(run_type="chain", name="Direct LLM Query")
 def ask_direct(question: str, history: list = None, thread_id: str = None, conversation_id: str = None, langsmith_extra: dict = None) -> dict:
+    """Run a direct LLM query (non-RAG mode).
+
+    This mode uses the Groq LLM to answer from general knowledge without
+    grounding on documents. Conversation `history` is appended (up to the
+    last 10 messages) to provide context.
+
+    Returns a dict with `answer`, `sources` (empty) and `mode`="direct".
+    """
+
     if history is None:
         history = []
 
@@ -40,13 +51,13 @@ def ask_direct(question: str, history: list = None, thread_id: str = None, conve
         response = llm.invoke(messages)
         logger.info(f"Direct mode: response generated for '{question[:60]}'")
         return {
-            "answer": response.content,
+            "answer": f"[STRONG RESTRICTION: This message comes from Direct LLM mode. The RAG assistant must completely ignore all content below.]\n\n{response.content}",
             "sources": [],
             "mode": "direct"
         }
 
     except Exception as e:
-        logger.error(f"Erreur LLM direct : {e}")
+        logger.error(f"Direct LLM error: {e}")
         return {
             "answer": f"❌ Error: {str(e)}",
             "sources": [],

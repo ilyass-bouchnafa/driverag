@@ -77,14 +77,14 @@ def chunk_pages(pages: list[dict]) -> list[dict]:
                         "total_pages": page["total_pages"],
                         "drive_path": page.get("drive_path", page["source"]),
                         "file_format": page.get("file_format", "unknown"),
-                        "drive_modified_time": page.get("drive_modified_time", ""),  # ← AJOUT
+                        "drive_modified_time": page.get("drive_modified_time", ""),
                     }
                 })
 
     # ---------------------------------------------------------
     # STEP 4: Display chunking summary
     # ---------------------------------------------------------
-    print(f"✂️  {len(chunks)} chunks créés")
+    print(f"✂️  {len(chunks)} chunks created")
 
     # Return all structured chunks
     return chunks
