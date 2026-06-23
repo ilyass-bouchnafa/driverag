@@ -1,239 +1,178 @@
-import logging
+"""
+src/generation/llm_chain.py
 
-# Import Groq LLM (fast inference)
-from langchain_groq import ChatGroq
-
-# Import message schema for structured chat input
-from langchain.schema import SystemMessage, HumanMessage
-
-from langchain.callbacks.manager import collect_runs
-
-# Import project configuration
-from src.config import GROQ_API_KEY, LLM_MODEL, TOP_K_RETRIEVAL, TOP_K_RERANKED
-
-# Import retrieval pipeline
-from src.retrieval.query_processor import advanced_retrieve
-
-# Import reranker
-from src.retrieval.reranker import rerank
-
-from langsmith import traceable, Client
-
-logger = logging.getLogger(__name__)
-
-# ---------------------------------------------------------
-# SYSTEM PROMPT (MULTILINGUAL CONTROL)
-# ---------------------------------------------------------
-SYSTEM_PROMPT = """You are a rigorous, precise, and expert academic assistant specialized in the user's personal academic documents.
-
-STRICT RULES - FOLLOW THEM ALL WITHOUT EXCEPTION:
-
-1. You MUST answer ONLY using the information explicitly present in the provided context documents.
-
-2. Answer the question EXACTLY as asked. Do not add any information that was not explicitly requested by the user.
-   - Do not give extra definitions, advantages, examples, or explanations unless the question specifically asks for them.
-   - Do not make summaries or conclusions unless the user explicitly asks for a summary.
-   - BE CONCISE: answer in the minimum number of sentences necessary to fully answer the question.
-
-3. For every important statement, claim, definition, or explanation, you MUST cite the exact source immediately after the sentence using this format: [File Name, Page X].
-   Example: A filter is an operation that modifies an image using a kernel. [Chapitre I-II_Pr AMINE.pdf, Page 65]
-
-4. If the answer (or ANY part of it) cannot be directly found word-for-word in the provided documents, respond EXACTLY with this single sentence and NOTHING else:
-   "I cannot find this information in the provided documents."
-   - NEVER add explanations, suggestions, or partial answers after this sentence.
-   - NEVER say "however I can tell you..." or "but from general knowledge..."
-   - NEVER invent document names, file names, or page numbers.
-   - If a file name does not appear literally in the DOCUMENTS section, it does NOT exist.
-   
-5. PREVIOUS MESSAGES HANDLING:
-   - If any previous assistant message starts with "[STRONG RESTRICTION:", it means this message comes from Direct LLM mode.
-     → You MUST completely IGNORE that entire message.
-     → Do NOT use any facts, explanations, or ideas from it.
-
-6. NEVER invent, extrapolate, add extra details, or over-explain.
-   NEVER fabricate document titles or file names — only cite sources that literally appear in the provided DOCUMENTS section.
-7. NEVER cite a source that does not explicitly appear in the provided documents.
-8. Use clear, formal, precise, and academic language. Be concise and direct. Avoid unnecessary repetitions and conclusions.
-9. RESPONSE LENGTH: Match the response length to the complexity of the question. Simple questions deserve short answers. Never pad responses with redundant information.
-10. Always respond in the SAME language as the user's question.
-
-Always prioritize precision, conciseness, and strict fidelity to the user's question and the source documents.
+Assemble toutes les corrections :
+  - Retrieval via Qdrant hybride (sparse+dense natif, plus de BM25
+    recalcule a la requete)
+  - Recherche parallele des variantes multi-query/HyDE (asyncio)
+  - Reranking a seuil relatif (reranker.py)
+  - Citations forcees par ID [Cx] -> remap vers [Fichier, Page] apres
+    generation, avec filet de securite anti-hallucination d'ID
+  - Historique de conversation scope par thread_id (SQLite, plus de
+    fuite entre sessions)
+  - Prompt systeme restructure : memes regles strictes, mais identite
+    de produit explicite (assistant academique nomme, pas un LLM nu)
 """
 
-# ---------------------------------------------------------
-# SIMPLE CONVERSATION MEMORY (last 5 exchanges)
-# ---------------------------------------------------------
-_history = []
+import asyncio
+import logging
 
-def format_context(chunks: list[dict]) -> str:
-    """Format a list of chunk dictionaries into a single prompt-ready string.
+from langchain_groq import ChatGroq
+from langchain.schema import SystemMessage, HumanMessage
+from langsmith import traceable
 
-    Each chunk is represented with a header containing its source and page,
-    followed by the chunk text. Chunks are separated by a visual divider.
+from src.config import GROQ_API_KEY, LLM_MODEL, TOP_K_RETRIEVAL, TOP_K_RERANKED
+from src.retrieval.query_processor import advanced_retrieve_async
+from src.retrieval.reranker import rerank
+from src.retrieval.qdrant_store import rebuild_bm25_stats
+from src.generation.citation_guard import build_context_with_ids, resolve_citations, detect_dominant_language
+from src.generation.conversation_store import get_history, append_message, init_db
 
-    Args:
-        chunks: List of chunk dictionaries, each containing a "metadata" key
-            with `source` and `page`, and a `text` field.
+logger = logging.getLogger(__name__)
+init_db()
 
-    Returns:
-        A single string containing all chunks formatted for the LLM prompt.
-    """
+# ---------------------------------------------------------------------
+# PROMPT SYSTEME
+# ---------------------------------------------------------------------
+# Memes regles strictes que l'original (anti-hallucination, citations
+# obligatoires, concision, fidelite au document). Ce qui change :
+#   - Identite produit explicite ("StudyMind" a adapter au nom reel du
+#     projet) plutot qu'un system prompt qui se presente comme un LLM nu
+#     -- coherent avec l'ambition "produit concurrent de NotebookLM",
+#     pas juste un wrapper de prompt.
+#   - Citations par [Cx] obligatoire (pas de nom de fichier invente
+#     possible, voir citation_guard.py) au lieu de [Fichier, Page] que
+#     le LLM devait ecrire lui-meme.
+#   - Regle explicite de langue de reponse quand question et documents
+#     ne sont pas dans la meme langue (voir point sur le multilingue).
+SYSTEM_PROMPT = """You are StudyMind, an academic research assistant that helps students understand and navigate their own personal document library (lecture notes, slides, course PDFs).
 
-    separator = "\n\n" + "─" * 40 + "\n\n"
-    parts = []
-    for chunk in chunks:
-        meta = chunk["metadata"]
-        parts.append(f"[{meta['source']}, Page {meta['page']}]\n{chunk['text']}")
-    return separator.join(parts)
-    
-@traceable(run_type="chain", name="RAG Query")
-def ask(question: str, external_history: list = None, thread_id: str = None, conversation_id: str = None, langsmith_extra: dict = None) -> dict:
-    """
-    Full RAG pipeline:
+You are not a general-purpose chatbot: you are grounded exclusively in the documents the student has provided. Your value comes from precision and traceability, not from broad knowledge.
 
-    Question
-        → Advanced Retrieval (Multi-query + HyDE + Hybrid Search)
-        → Reranking (CrossEncoder)
-        → Context building
-        → LLM (Groq)
-        → Answer with citations
+STRICT RULES — FOLLOW THEM ALL WITHOUT EXCEPTION:
 
-    Parameters
-    ----------
-    question : str
-        User query
-    
-    external_history : list
-        Optional list of `langchain` message objects to include as conversation history.
+1. Answer ONLY using information explicitly present in the DOCUMENTS section below. Never use outside knowledge to fill gaps.
 
-    Returns
-    -------
-    dict
-        {
-            "answer": generated response,
-            "sources": list of source metadata
-        }
-    """
+2. Answer EXACTLY what was asked, nothing more:
+   - No extra definitions, examples, or explanations unless explicitly requested.
+   - No summary or conclusion unless explicitly requested.
+   - Be concise: the minimum number of sentences that fully answers the question.
 
-    # ---------------------------------------------------------
-    # STEP 1: Advanced Retrieval
-    # ---------------------------------------------------------
-    # Retrieve candidate chunks using multi-query + HyDE + hybrid search
-    candidates = advanced_retrieve(question, k=TOP_K_RETRIEVAL)
+3. CITATIONS ARE MANDATORY AND MUST USE THE [Cx] FORMAT ONLY:
+   - Every document is given to you labeled [C1], [C2], [C3], etc.
+   - After every factual claim, cite the exact label it came from: example "A filter modifies an image using a kernel [C2]."
+   - NEVER write a file name or page number yourself. NEVER invent a [Cx] label that wasn't given to you.
+   - You may cite multiple labels for one claim if needed: [C1][C3].
 
-    if not candidates:
-        return {
-            "answer": "⚠️ No indexed documents found. Please sync your data first.",
-            "sources": []
-        }
-    
-    # ---------------------------------------------------------
-    # STEP 1: Advanced Retrieval
-    # ---------------------------------------------------------
-    # Retrieve candidate chunks using multi-query + HyDE + hybrid search
-    final_chunks = rerank(question, candidates, top_k=TOP_K_RERANKED)
+4. If the answer (or any part of it) cannot be found in the DOCUMENTS section, respond EXACTLY with this sentence and NOTHING else:
+   "I cannot find this information in the provided documents."
+   - Never add explanations, partial answers, or "however, generally speaking...".
+   - Never guess a [Cx] label just to produce a citation.
 
-    # ---------------------------------------------------------
-    # STEP 3: Build context
-    # ---------------------------------------------------------
-    # Convert chunks into a structured prompt context
-    context = format_context(final_chunks)
+5. RESPONSE LANGUAGE:
+   - Default: answer in the same language as the student's question.
+   - Exception: if the question is in language A but the relevant documents are clearly in language B, and translating a key technical term would lose precision (formulas, exact terminology, named definitions), you may answer in language A but quote the precise technical term from the document in language B in parentheses. Always keep citations [Cx] regardless of language.
 
-    # ---------------------------------------------------------
-    # STEP 4: Conversation history !!!
-    # ---------------------------------------------------------
-    # Keep only the last 5 exchanges (10 messages total)
-    if external_history is not None:
-        history = external_history[-10:]
-    else:
-        history = _history[-10:]
+6. Use clear, formal, academic language. Avoid repetition and filler conclusions.
 
-    # ---------------------------------------------------------
-    # STEP 5: LLM call (Groq)
-    # ---------------------------------------------------------
-    llm = ChatGroq(
-        model=LLM_MODEL,
+7. MULTI-PART QUESTIONS: if a question contains multiple sub-questions, answer each part independently using the rules above. A sub-question without supporting documents must receive the standard refusal sentence, while other sub-questions with supporting documents must still be answered normally with citations.
 
-        api_key=GROQ_API_KEY,
+8. OUTPUT FORMATTING (MANDATORY):
+   - Always use Markdown formatting in your answer.
+   - If you list multiple items (filters, algorithms, types, steps, definitions),
+     use a numbered list (1., 2., 3.) or bullet points (-), ONE item per line.
+   - NEVER merge a list item and its definition into a single run-on sentence
+     or paragraph. Each list item must be on its own line.
+   - If an item has multiple sub-points (e.g. a filter with several properties),
+     nest them as sub-bullets under that item, indented, not as a flat
+     continuous paragraph.
+   - Use a blank line between distinct sections of your answer (e.g. between
+     a list of items and their detailed definitions).
+   - Bold the key term being defined when relevant (e.g. **Filtre passe-bas**).
+     
+Always prioritize precision, conciseness, and strict fidelity to the student's question and to the documents actually provided to you.
+"""
 
-        # Low temperature for factual, grounded answers
-        temperature=0.1,
 
-    )
-
-    # Build message list
+def _build_messages(question: str, context_with_ids: str, history: list) -> list:
     messages = [SystemMessage(content=SYSTEM_PROMPT)]
     messages.extend(history)
     messages.append(HumanMessage(
-        content=f"DOCUMENTS :\n{context}\n\nQUESTION : {question}"
+        content=f"DOCUMENTS:\n{context_with_ids}\n\nQUESTION: {question}"
     ))
+    return messages
 
-    # Generate response
-    response = llm.invoke(messages)
 
-    # ---------------------------------------------------------
-    # STEP 6: Save conversation memory
-    # ---------------------------------------------------------
-    _history.append(HumanMessage(content=question))
-    _history.append(response)
+@traceable(run_type="chain", name="RAG Query")
+async def ask_async(
+    question: str,
+    vocab,
+    df: dict,
+    n_docs: int,
+    thread_id: str,
+) -> dict:
+    """
+    Pipeline RAG complet, version async (utilisee par le backend FastAPI
+    qui est lui-meme async — pas de asyncio.run() imbrique necessaire).
 
-    # ---------------------------------------------------------
-    # STEP 7: Extract unique sources
-    # ---------------------------------------------------------
-    sources =[]
-    seen = set()
+    Parameters
+    ----------
+    vocab, df, n_docs : stats BM25 globales precalculees au sync (voir
+        src.retrieval.qdrant_store.rebuild_bm25_stats), partagees entre
+        toutes les requetes tant qu'un nouveau sync n'a pas eu lieu.
+    thread_id : identifiant de conversation, utilise pour scoper
+        l'historique dans SQLite (corrige la fuite entre sessions).
+    """
+    # ETAPE 1 : retrieval avance, parallele (multi-query + HyDE + hybrid search)
+    candidates = await advanced_retrieve_async(question, vocab, df, n_docs, k=TOP_K_RETRIEVAL)
 
-    for chunk in final_chunks:
-        key = (chunk["metadata"]["source"], chunk["metadata"]["page"])
-        if key not in seen:
-            seen.add(key)
-            sources.append({
-                "file": chunk["metadata"]["source"],
-                "path": chunk["metadata"].get("drive_path", chunk["metadata"]["source"]),
-                "page": chunk["metadata"]["page"],
-                "total_pages": chunk["metadata"].get("total_pages", "?"),
-                "format": chunk["metadata"].get("file_format", "?"),
+    if not candidates:
+        return {
+            "answer": "Aucun document indexe trouve. Lancez d'abord une synchronisation.",
+            "sources": [],
+        }
 
-                # Prefer rerank score, fallback to retrieval score
-                "score": round(chunk.get("rerank_score", chunk.get("score", 0)), 3)
-            })
+    # ETAPE 2 : reranking a seuil relatif
+    final_chunks = rerank(question, candidates, top_k=TOP_K_RERANKED)
 
-    raw_contexts = [chunk["text"] for chunk in final_chunks]
+    # ETAPE 3 : construction du contexte avec IDs forces [C1], [C2], ...
+    context_with_ids, id_to_chunk = build_context_with_ids(final_chunks)
+
+    # ETAPE 4 : historique scope par thread_id (SQLite, plus de fuite)
+    history = get_history(thread_id)
+
+    # ETAPE 5 : appel LLM
+    llm = ChatGroq(model=LLM_MODEL, api_key=GROQ_API_KEY, temperature=0.1)
+    messages = _build_messages(question, context_with_ids, history)
+    response = await llm.ainvoke(messages)
+
+    # ETAPE 6 : resolution des citations [Cx] -> [Fichier, Page] reels,
+    # avec rejet silencieux des IDs hallucines (filet de securite)
+    clean_answer, cited_sources = resolve_citations(response.content, id_to_chunk)
+
+    from src.generation.citation_guard import strip_cx_for_eval
+    answer_for_eval = strip_cx_for_eval(response.content)
+
+    # ETAPE 7 : persistance de l'historique (scope par thread_id)
+    append_message(thread_id, "human", question)
+    append_message(thread_id, "ai", clean_answer)
 
     return {
-        "answer": response.content, 
-        "sources": sources,
-        "raw_contexts": raw_contexts  # <--- Indispensable pour l'évaluation !
+        "answer": clean_answer,
+        "answer_for_eval": answer_for_eval,
+        "sources": cited_sources,
+        "raw_contexts": [c["text"] for c in final_chunks],
+        "dominant_doc_language": detect_dominant_language(final_chunks),
     }
 
-def clear_memory():
-    """
-    Clear conversation memory.
-    Useful to reset context between sessions.
-    """
 
-    global _history
-    _history.clear()
+def ask(question: str, vocab, df: dict, n_docs: int, thread_id: str) -> dict:
+    """Wrapper synchrone (utile pour les scripts de test/CLI)."""
+    return asyncio.run(ask_async(question, vocab, df, n_docs, thread_id))
 
-def _call_llm_with_chunks(question: str, chunks: list[dict]) -> str:
-    """Call the LLM using pre-built document chunks.
 
-    This helper formats the provided chunks into the prompt context, builds
-    the message list and invokes the ChatGroq model returning the generated
-    content string.
-
-    Args:
-        question: The user question to send to the LLM.
-        chunks: A list of chunk dictionaries (same format used in RAG pipeline).
-
-    Returns:
-        The text content returned by the LLM invocation.
-    """
-
-    context = format_context(chunks)
-    llm = ChatGroq(model=LLM_MODEL, api_key=GROQ_API_KEY, temperature=0.1)
-    messages = [
-        SystemMessage(content=SYSTEM_PROMPT),
-        HumanMessage(content=f"DOCUMENTS :\n{context}\n\nQUESTION : {question}")
-    ]
-    return llm.invoke(messages).content
+def clear_memory(thread_id: str):
+    """Efface l'historique d'UN thread specifique (pas tous les threads
+    -- corrige clear_memory() qui effacait l'historique global avant)."""
+    from src.generation.conversation_store import clear_thread
+    clear_thread(thread_id)
