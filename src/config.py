@@ -10,6 +10,11 @@ GOOGLE_DRIVE_FOLDER_ID = os.getenv("GOOGLE_DRIVE_FOLDER_ID")
 # ─── ChromaDB ────────────────────────────────────────────
 CHROMA_PERSIST_DIR = os.getenv("CHROMA_PERSIST_DIR", "./chroma_db")
 
+# ─── Qdrant ──────────────────────────────────────────────
+QDRANT_URL = os.getenv("QDRANT_URL", "http://localhost:6333")
+QDRANT_COLLECTION = os.getenv("QDRANT_COLLECTION", "driverag")
+DENSE_VECTOR_SIZE = int(os.getenv("DENSE_VECTOR_SIZE", "384"))
+
 # ─── Redis ───────────────────────────────────────────────
 REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379/0")
 REDIS_CACHE_TTL = 3600 * 24 * 7   # 7 jours par défaut
@@ -20,6 +25,7 @@ CHUNK_OVERLAP = 200
 
 # ─── LLM ─────────────────────────────────────────────────
 LLM_MODEL = "llama-3.1-8b-instant"
+#LLM_MODEL = "llama-3.3-70b-versatile"
 
 # ─── Embeddings ──────────────────────────────────────────
 # all-MiniLM-L6-v2: small (90MB), fast, very efficient

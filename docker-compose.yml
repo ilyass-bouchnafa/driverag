@@ -1,24 +1,24 @@
 version: '3.8'
 
 services:
-  driverag:
-    # Build the image from the Dockerfile in the current directory
-    build: .
+  qdrant:
+    image: qdrant/qdrant:latest
+    ports:
+      - "6333:6333"
+    volumes:
+      - ./qdrant_storage:/qdrant/storage
+    restart: unless-stopped
 
-    # Map local port 8501 to container port 8501
+  driverag:
+    build: .
     ports:
       - "8501:8501"
-
-    # Mount persistent volumes
     volumes:
-      # Persist Chroma vector database
-      - ./chroma_db:/app/chroma_db
-
-      # Mount Google Oauth credentials securely
       - ./credentials:/app/credentials
-
+      - ./data:/app/data
+      # - ./chroma_db:/app/chroma_db
     env_file:
       - .env
-    
-    # Automatically restart unless manually stopped
+    depends_on:
+      - qdrant
     restart: unless-stopped
