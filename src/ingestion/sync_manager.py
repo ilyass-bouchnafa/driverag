@@ -1,296 +1,200 @@
 """
-Smart Synchronization Manager
+src/ingestion/sync_manager.py
 
-Overview
---------
-This module implements an intelligent synchronization system between:
-- Google Drive (source of truth)
-- ChromaDB (vector database)
+Corrige deux points lies a la migration Qdrant + collision de noms :
 
-Problem
--------
-Re-indexing all files every time is inefficient and slow.
+1. L'ancien get_indexed_file_timestamps() indexait par `file_name`
+   (nom de fichier). C'est exactement la collision documentee : deux
+   fichiers Drive de meme nom dans des dossiers differents se
+   melangeaient. Desormais on indexe par `drive_id` (identifiant Drive
+   stable, jamais reutilise -- voir src/ingestion/chunk_identity.py).
 
-Solution
---------
-We use the Google Drive `modifiedTime` field to detect changes:
-- New file      → Index it
-- Modified file → Re-index it
-- Unchanged     → Skip it
-
-Key Idea
---------
-Each chunk stored in ChromaDB contains metadata:
-    {
-        "source": "file.pdf",
-        "drive_modified_time": "2024-01-01T10:00:00"
-    }
-
-During sync, we compare:
-    Drive modifiedTime vs Stored modifiedTime
-
-If different → file has changed.
+2. Le sync ecrivait dans ChromaDB sans jamais recalculer les stats BM25
+   globales (vocab/df/avgdl). Avec la migration Qdrant, ces stats DOIVENT
+   etre recalculees a la fin de CHAQUE sync (pas a chaque requete, voir
+   src/retrieval/qdrant_store.py) et persistees pour etre reutilisees
+   par toutes les requetes utilisateur jusqu'au prochain sync.
 """
 
-# ---------------------------------------------------------
-# STANDARD LIBRARIES
-# ---------------------------------------------------------
 import logging
 import threading
 import time
+import pickle
 from datetime import datetime
+from pathlib import Path
 from typing import Optional
 
-# ---------------------------------------------------------
-# GOOGLE DRIVE INGESTION
-# ---------------------------------------------------------
-from src.ingestion.gdrive_loader import (
-    list_files_recursive,
-    download_file
-)
-
-# ---------------------------------------------------------
-# FILE PROCESSING PIPELINE
-# ---------------------------------------------------------
+from src.ingestion.gdrive_loader import list_files_recursive, download_file
 from src.ingestion.file_router import extract_text_from_bytes
 from src.ingestion.chunker import chunk_pages
 
-# ---------------------------------------------------------
-# VECTOR STORE (ChromaDB)
-# ---------------------------------------------------------
-from src.retrieval.vectorstore import (
-    add_chunks_to_store,
+from src.retrieval.qdrant_store import (
+    index_chunks,
     get_all_chunks,
-    delete_chunks_by_source
+    delete_chunks_by_drive_id,
+    rebuild_bm25_stats,
 )
 
-# ---------------------------------------------------------
-# CONFIGURATION
-# ---------------------------------------------------------
 from src.config import GOOGLE_DRIVE_FOLDER_ID
 
 logger = logging.getLogger(__name__)
 
+# Persistance simple des stats BM25 sur disque : evite de devoir tout
+# rescanner Qdrant au redemarrage du serveur avant la premiere requete.
+BM25_STATS_PATH = Path(__file__).parent.parent.parent / "data" / "bm25_stats.pkl"
 
-# =========================================================
-# FUNCTION: Get Indexed File Timestamps
-# =========================================================
-def get_indexed_file_timestamps() -> dict[str, str]:
+# Cache en memoire des stats BM25 courantes, partage par toutes les
+# requetes jusqu'au prochain sync (c'est ce qui evite le recalcul a
+# chaque appel utilisateur).
+_current_vocab = None
+_current_df = None
+_current_avgdl = None
+_current_n_docs = 0
+
+
+def get_current_bm25_stats():
     """
-    Retrieve a mapping of indexed files and their last known modified time.
-
-    Why?
-    ----
-    We store metadata in ChromaDB for each chunk.
-    This allows us to reconstruct which files were indexed
-    and when they were last modified.
-
-    Returns
-    -------
-    dict[str, str]
-        {
-            "file1.pdf": "2024-01-01T10:00:00",
-            "file2.docx": "2024-01-02T12:00:00"
-        }
-    
-    Note: Returns files WITHOUT drive_modified_time as empty string
-    to trigger re-indexing once (migration of old chunks)
+    Retourne les stats BM25 actuellement en memoire. Si aucune n'a
+    encore ete calculee dans ce process (ex: juste apres un redemarrage
+    serveur), tente de les charger depuis le disque, sinon les recalcule
+    depuis Qdrant une seule fois.
     """
+    global _current_vocab, _current_df, _current_avgdl, _current_n_docs
 
+    if _current_vocab is not None:
+        return _current_vocab, _current_df, _current_n_docs
+
+    if BM25_STATS_PATH.exists():
+        with open(BM25_STATS_PATH, "rb") as f:
+            _current_vocab, _current_df, _current_avgdl, _current_n_docs = pickle.load(f)
+        logger.info("BM25 stats chargees depuis le disque")
+        return _current_vocab, _current_df, _current_n_docs
+
+    logger.warning("Aucune stat BM25 en cache, recalcul depuis Qdrant (peut etre lent une fois)")
+    _refresh_bm25_stats()
+    return _current_vocab, _current_df, _current_n_docs
+
+
+def _refresh_bm25_stats():
+    """Recalcule les stats BM25 depuis Qdrant et les persiste sur disque."""
+    global _current_vocab, _current_df, _current_avgdl, _current_n_docs
+
+    vocab, df, avgdl = rebuild_bm25_stats()
+    n_docs = len(get_all_chunks())
+
+    _current_vocab, _current_df, _current_avgdl, _current_n_docs = vocab, df, avgdl, n_docs
+
+    BM25_STATS_PATH.parent.mkdir(parents=True, exist_ok=True)
+    with open(BM25_STATS_PATH, "wb") as f:
+        pickle.dump((vocab, df, avgdl, n_docs), f)
+
+    logger.info(f"BM25 stats recalculees : {len(vocab)} tokens, {n_docs} chunks")
+
+
+def get_indexed_file_state() -> dict:
+    """
+    Retourne {drive_id: drive_modified_time} pour tous les fichiers
+    indexes -- scope par drive_id, PAS par nom de fichier (fix de la
+    collision). Deux fichiers de meme nom dans des dossiers differents
+    ont des drive_id distincts et ne se melangent plus jamais.
+    """
     try:
-        # -------------------------------------------------
-        # STEP 1: Retrieve all chunks from ChromaDB
-        # -------------------------------------------------
         all_chunks = get_all_chunks()
-
-        timestamps = {}
-
-        # -------------------------------------------------
-        # STEP 2: Extract metadata from chunks
-        # -------------------------------------------------
+        state = {}
         for chunk in all_chunks:
-            metadata = chunk.get("metadata", {})
-
-            source = metadata.get("source")
-            mod_time = metadata.get("drive_modified_time", "")
-
-            # -------------------------------------------------
-            # STEP 3: Store only one entry per file
-            # Important: store "" for files without timestamp
-            # This triggers ONE re-index for old chunks
-            # -------------------------------------------------
-            if source and source not in timestamps:
-                timestamps[source] = mod_time
-
-        logger.info(f"📊 Retrieved {len(timestamps)} indexed files from ChromaDB")
-        
-        return timestamps
-
+            meta = chunk.get("metadata", {})
+            drive_id = meta.get("drive_id")
+            mod_time = meta.get("drive_modified_time", "")
+            if drive_id and drive_id not in state:
+                state[drive_id] = mod_time
+        logger.info(f"{len(state)} fichiers indexes (scope par drive_id)")
+        return state
     except Exception as e:
-        logger.warning(f"Failed to retrieve timestamps: {e}")
+        logger.warning(f"Echec recuperation etat indexe: {e}")
         return {}
 
 
-# =========================================================
-# FUNCTION: Smart Sync
-# =========================================================
 def smart_sync(force_all: bool = False) -> dict:
     """
-    Perform intelligent synchronization with Google Drive.
+    Synchronisation intelligente avec Google Drive, scopee par drive_id.
 
-    Algorithm
-    ---------
-    1. Get indexed files (from ChromaDB)
-    2. Get current files (from Google Drive)
-    3. For each file:
-        - If not indexed → NEW → index it
-        - If modified → UPDATED → delete + re-index
-        - If unchanged → SKIP
-
-    Parameters
-    ----------
-    force_all : bool
-        If True, re-index all files regardless of modification
-
-    Returns
-    -------
-    dict
-        {
-            "new": int,
-            "updated": int,
-            "skipped": int,
-            "errors": list
-        }
+    A la fin du sync (que des fichiers aient change ou non, sauf si
+    rien n'a ete touche), les stats BM25 globales sont recalculees UNE
+    FOIS -- c'est le seul moment ou ce recalcul a lieu, plus jamais a la
+    requete utilisateur.
     """
+    logger.info("Demarrage de la synchronisation intelligente...")
 
-    logger.info("🔄 Starting smart synchronization...")
+    stats = {"new": 0, "updated": 0, "skipped": 0, "errors": []}
 
-    stats = {
-        "new": 0,
-        "updated": 0,
-        "skipped": 0,
-        "errors": []
-    }
+    indexed_state = {} if force_all else get_indexed_file_state()
 
-    # ---------------------------------------------------------
-    # STEP 1: Load indexed file timestamps
-    # ---------------------------------------------------------
-    indexed_files = {} if force_all else get_indexed_file_timestamps()
-
-    logger.info(f"📊 Indexed files: {len(indexed_files)}")
-    if indexed_files:
-        logger.debug(f"   Indexed timestamps: {indexed_files}")
-    else:
-        logger.warning("⚠️  No indexed file timestamps found - will re-index all files")
-
-    # ---------------------------------------------------------
-    # STEP 2: Retrieve files from Google Drive
-    # ---------------------------------------------------------
     try:
         drive_files = list_files_recursive(GOOGLE_DRIVE_FOLDER_ID)
-        logger.info(f"📂 Drive files: {len(drive_files)}")
-
+        logger.info(f"{len(drive_files)} fichiers trouves sur Drive")
     except Exception as e:
-        logger.error(f"Failed to list Drive files: {e}")
+        logger.error(f"Echec de listing Drive: {e}")
         stats["errors"].append(str(e))
         return stats
 
-    # ---------------------------------------------------------
-    # STEP 3: Process each file
-    # ---------------------------------------------------------
-    for file in drive_files:
+    any_change = False
 
-        file_name = file["name"]
+    for file in drive_files:
+        drive_id = file["id"]
         drive_mod_time = file.get("modifiedTime", "")
 
-        # -----------------------------------------------------
-        # STEP 4: Decide action (NEW / UPDATED / SKIP)
-        # -----------------------------------------------------
-        if file_name in indexed_files:
-
-            stored_timestamp = indexed_files[file_name]
-            
-            # Case 1: File with timestamp → Compare strictly
-            if stored_timestamp:  # Non-empty timestamp
-                if stored_timestamp == drive_mod_time and not force_all:
-                    logger.debug(f"   ✓ Unchanged: {file_name}")
-                    logger.debug(f"      Stored: {stored_timestamp}")
-                    logger.debug(f"      Drive:  {drive_mod_time}")
-                    stats["skipped"] += 1
-                    continue
-                else:
-                    # Modified file
-                    logger.info(f"🔄 Updated file: {file_name}")
-                    logger.debug(f"   Stored: {stored_timestamp}")
-                    logger.debug(f"   Drive:  {drive_mod_time}")
-                    action = "updated"
-            
-            # Case 2: File without timestamp (old chunk) → Re-index once
-            else:
-                logger.info(f"⚡ Migrating old chunk: {file_name} (adding timestamp)")
-                action = "updated"
-            
-            delete_chunks_by_source(file_name)
-
+        if drive_id in indexed_state:
+            stored_timestamp = indexed_state[drive_id]
+            if stored_timestamp and stored_timestamp == drive_mod_time and not force_all:
+                stats["skipped"] += 1
+                continue
+            action = "updated"
+            delete_chunks_by_drive_id(drive_id)  # scope par drive_id, pas par nom
         else:
-            # Case 3: New file
-            logger.info(f"🆕 New file: {file_name}")
             action = "new"
 
-        # -----------------------------------------------------
-        # STEP 5: Download file
-        # -----------------------------------------------------
         try:
-            file_bytes = download_file(
-                file["id"],
-                file["name"],
-                file["mimeType"]
-            )
+            file_bytes = download_file(drive_id, file["name"], file["mimeType"])
+            pages = extract_text_from_bytes(file_bytes, file["name"], file["format"])
 
-            # -------------------------------------------------
-            # STEP 6: Extract text
-            # -------------------------------------------------
-            pages = extract_text_from_bytes(
-                file_bytes,
-                file["name"],
-                file["format"]
-            )
-
-            # -------------------------------------------------
-            # STEP 7: Enrich metadata
-            # -------------------------------------------------
             for page in pages:
+                page["drive_id"] = drive_id
                 page["drive_path"] = file["path"]
                 page["file_format"] = file["format"]
-
-                # CRITICAL: store modifiedTime
                 page["drive_modified_time"] = drive_mod_time
 
-            # -------------------------------------------------
-            # STEP 8: Chunk pages
-            # -------------------------------------------------
             chunks = chunk_pages(pages)
 
-            # -------------------------------------------------
-            # STEP 9: Store in ChromaDB
-            # -------------------------------------------------
-            add_chunks_to_store(chunks)
+            # NOTE IMPORTANTE : index_chunks() a besoin du vocab/df/avgdl
+            # COURANTS pour encoder les sparse vectors. On utilise les
+            # stats encore valides de l'INDEXATION PRECEDENTE pour ce
+            # batch ; elles seront recalculees globalement a la fin du
+            # sync complet (voir plus bas), donc legerement obsoletes
+            # pendant le sync lui-meme -- acceptable car le recalcul
+            # final corrige tout avant que la moindre requete utilisateur
+            # n'arrive.
+            vocab, df, n_docs = get_current_bm25_stats()
+            avgdl = _current_avgdl or 200.0
+            index_chunks(chunks, vocab, df, avgdl)
 
             stats[action] += 1
-
-            logger.info(f"✅ {file_name} indexed ({len(chunks)} chunks)")
+            any_change = True
+            logger.info(f"{file['name']} indexe ({len(chunks)} chunks)")
 
         except Exception as e:
-            error_msg = f"Error processing {file_name}: {str(e)}"
+            error_msg = f"Erreur sur {file['name']}: {str(e)}"
             logger.error(error_msg)
             stats["errors"].append(error_msg)
 
-    logger.info(f"✅ Sync completed: {stats}")
+    if any_change:
+        _refresh_bm25_stats()
+
+    logger.info(f"Sync termine: {stats}")
     return stats
 
 
 # =========================================================
-# AUTO SYNC (BACKGROUND THREAD)
+# AUTO SYNC (THREAD DE FOND) -- inchangé dans sa logique
 # =========================================================
 
 _auto_sync_thread: Optional[threading.Thread] = None
@@ -300,94 +204,42 @@ _last_sync_time = None
 
 
 def start_auto_sync(interval_seconds: int = 1800):
-    """
-    Start automatic synchronization in the background.
-
-    Why?
-    ----
-    - Avoid manual sync
-    - Keep vector DB always up-to-date
-    - Run without blocking Streamlit UI
-
-    Parameters
-    ----------
-    interval_seconds : int
-        Time between sync runs (default: 1800s = 30 minutes)
-    """
-
     global _auto_sync_running, _auto_sync_thread
 
     if _auto_sync_running:
-        logger.info("Auto-sync already running")
+        logger.info("Auto-sync deja en cours")
         return
 
     _auto_sync_running = True
 
-    # ---------------------------------------------------------
-    # BACKGROUND LOOP
-    # ---------------------------------------------------------
     def _sync_loop():
         global _last_sync_result, _last_sync_time
-
-        logger.info(f"🤖 Auto-sync started (interval={interval_seconds}s)")
-
+        logger.info(f"Auto-sync demarre (intervalle={interval_seconds}s)")
         while _auto_sync_running:
             time.sleep(interval_seconds)
-
             if not _auto_sync_running:
                 break
-
             try:
-                logger.info("🔄 Auto-sync running...")
-
                 _last_sync_result = smart_sync()
                 _last_sync_time = datetime.now().strftime("%H:%M:%S")
-
-                logger.info(f"✅ Auto-sync result: {_last_sync_result}")
-
             except Exception as e:
-                logger.error(f"❌ Auto-sync error: {e}")
+                logger.error(f"Erreur auto-sync: {e}")
                 _last_sync_result = {"error": str(e)}
 
-            
-
-    # ---------------------------------------------------------
-    # START THREAD
-    # ---------------------------------------------------------
-    _auto_sync_thread = threading.Thread(
-        target=_sync_loop,
-        daemon=True
-    )
-
+    _auto_sync_thread = threading.Thread(target=_sync_loop, daemon=True)
     _auto_sync_thread.start()
-
-    logger.info("✅ Auto-sync thread started")
+    logger.info("Thread auto-sync demarre")
 
 
 def stop_auto_sync():
-    """
-    Stop automatic synchronization.
-    """
     global _auto_sync_running
     _auto_sync_running = False
-    logger.info("⏹️ Auto-sync stopped")
+    logger.info("Auto-sync arrete")
 
 
 def get_auto_sync_status() -> dict:
-    """
-    Retrieve current auto-sync status.
-
-    Returns
-    -------
-    dict
-        {
-            "running": bool,
-            "last_result": dict,
-            "last_time": str
-        }
-    """
     return {
         "running": _auto_sync_running,
         "last_result": _last_sync_result,
-        "last_time": _last_sync_time
+        "last_time": _last_sync_time,
     }

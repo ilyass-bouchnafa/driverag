@@ -1,4 +1,4 @@
-# Import the SentenceTransformer model from the sentence-transformers library
+import threading
 from sentence_transformers import SentenceTransformer
 
 # Import embedding model configuration from project settings
@@ -6,6 +6,7 @@ from src.config import EMBEDDING_MODEL
 
 # Global variable to store the loaded model (singleton pattern)
 _model = None
+_lock = threading.Lock()
 
 def get_embedder() -> SentenceTransformer:
     """
@@ -29,9 +30,11 @@ def get_embedder() -> SentenceTransformer:
 
     global _model
     if _model is None:
-        # Load the model only once and print a message
-        print(f"🤖 Loading embedder: {EMBEDDING_MODEL}")
-        _model = SentenceTransformer(EMBEDDING_MODEL)
+        with _lock:
+            if _model is None:
+                # Load the model only once and print a message
+                print(f"🤖 Loading embedder: {EMBEDDING_MODEL}")
+                _model = SentenceTransformer(EMBEDDING_MODEL)
     return _model
 
 def embed_texts(texts: list[str]) -> list[list[float]]:
