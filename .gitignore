@@ -240,9 +240,12 @@ build/
 # Databases (auto-generated, too large)
 # ============================================================================
 chroma_db/
+qdrant_storage/
+data/
 *.sqlite3
 *.sqlite3-journal
 db.sqlite3
+workspace_context.txt
 
 # ============================================================================
 # React / Node.js / Frontend
