@@ -1,7 +1,7 @@
 import React, { useState } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
-import { ChevronDown, ChevronUp, FileText, Sparkles, User } from "lucide-react";
+import { ChevronDown, ChevronUp, FileText, Sparkles, User, Copy, Check } from "lucide-react";
 
 function SourceCard({ src, index }) {
   return (
@@ -17,8 +17,15 @@ function SourceCard({ src, index }) {
 
 export default function MessageBubble({ message }) {
   const [showSources, setShowSources] = useState(false);
+  const [copied, setCopied] = useState(false);
   const isUser = message.role === "user";
   const hasSources = message.sources && message.sources.length > 0;
+
+  const handleCopy = () => {
+    navigator.clipboard.writeText(message.content);
+    setCopied(true);
+    setTimeout(() => setCopied(false), 2000);
+  };
 
   return (
     <div className={`msg-row ${isUser ? "msg-row--user" : "msg-row--ai"}`}>
@@ -69,6 +76,9 @@ export default function MessageBubble({ message }) {
               {message.sources.length} source{message.sources.length > 1 ? "s" : ""}
             </button>
           )}
+          <button className="sources-toggle copy-btn-hover" onClick={handleCopy} title="Copier le message" style={{ marginLeft: "4px" }}>
+            {copied ? <Check size={12} style={{ color: "var(--green)" }} /> : <Copy size={12} />}
+          </button>
         </div>
 
         {hasSources && showSources && (
@@ -176,6 +186,16 @@ export default function MessageBubble({ message }) {
           transition: all 0.15s;
         }
         .sources-toggle:hover { border-color: var(--accent); color: var(--accent-2); }
+
+        .copy-btn-hover {
+          opacity: 0;
+          pointer-events: none;
+          transition: opacity 0.2s;
+        }
+        .msg-row:hover .copy-btn-hover {
+          opacity: 1;
+          pointer-events: auto;
+        }
 
         .sources-list {
           display: flex;

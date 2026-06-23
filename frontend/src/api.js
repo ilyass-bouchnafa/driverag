@@ -34,5 +34,13 @@ export const api = {
 
   sync: () => fetch(`${BASE}/sync`, { method: "POST" }).then(handle),
 
-  clearMemory: () => fetch(`${BASE}/clear`, { method: "POST" }).then(handle),
+  clearMemory: (threadId) =>
+    fetch(`${BASE}/clear`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ thread_id: threadId }),
+    }).then(handle),
+
+  getThreads: () => fetch(`${BASE}/threads`).then(handle),
+  getHistory: (threadId) => fetch(`${BASE}/history/${threadId}`).then(handle),
 };

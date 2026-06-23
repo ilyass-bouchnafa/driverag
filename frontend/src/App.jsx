@@ -36,8 +36,32 @@ export default function App() {
   const [files, setFiles]           = useState([]);
   const [online, setOnline]         = useState(true);
   const [sidebarOpen, setSidebarOpen] = useState(true);
-  const [threadId]                  = useState(() => crypto.randomUUID());
-  const [conversationId]            = useState(() => `conv_${Date.now()}`);
+  const [threadId, setThreadId]     = useState(() => crypto.randomUUID());
+  const [pastThreads, setPastThreads] = useState([]);
+
+  const loadThreads = useCallback(async () => {
+    try {
+      const data = await api.getThreads();
+      setPastThreads(Array.isArray(data) ? data : []);
+    } catch {}
+  }, []);
+
+  useEffect(() => { loadThreads(); }, [loadThreads, messages.length]);
+
+  const handleNewConversation = useCallback(() => {
+    setThreadId(crypto.randomUUID());
+    setMessages([]);
+  }, []);
+
+  const handleSelectThread = useCallback(async (selectedThreadId) => {
+    setThreadId(selectedThreadId);
+    try {
+      const history = await api.getHistory(selectedThreadId);
+      setMessages(history);
+    } catch {
+      setMessages([]);
+    }
+  }, []);
 
   const [countdown, resetCountdown] = useCountdown(SYNC_INTERVAL);
 
@@ -103,13 +127,10 @@ export default function App() {
     setLoading(true);
 
     try {
-      const history = messages.map(m => ({ role: m.role, content: m.content }));
       const result = await api.chat({
         message: text,
         mode,
-        history,
         thread_id: threadId,
-        conversation_id: conversationId,
       });
 
       const aiMsg = {
@@ -132,7 +153,7 @@ export default function App() {
     } finally {
       setLoading(false);
     }
-  }, [messages, mode, loading, threadId, conversationId]);
+  }, [messages, mode, loading, threadId]);
 
   // ── Upload ────────────────────────────────────────────────────────────────
   const handleUpload = useCallback(async (file) => {
@@ -142,8 +163,8 @@ export default function App() {
   }, [loadFiles]);
   const handleClear = useCallback(async () => {
     setMessages([]);
-    try { await api.clearMemory(); } catch {}
-  }, []);
+    try { await api.clearMemory(threadId); } catch {}
+  }, [threadId]);
 
   // ── Sidebar content ───────────────────────────────────────────────────────
   const [showAllFiles, setShowAllFiles] = useState(false);
@@ -178,13 +199,35 @@ export default function App() {
             </nav>
 
             <div className="sidebar-section">
+              <div className="sidebar-section-header">Conversations</div>
+              <button className="new-conv-btn" onClick={handleNewConversation}>
+                + Nouvelle conversation
+              </button>
+              <div className="thread-list">
+                {pastThreads.map((t) => (
+                  <button
+                    key={t.thread_id}
+                    className={`thread-item ${t.thread_id === threadId ? "thread-item--active" : ""}`}
+                    onClick={() => handleSelectThread(t.thread_id)}
+                  >
+                    {t.preview || "Nouvelle conversation"}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            <div className="sidebar-section">
               <div className="sidebar-section-header">Indexed Files</div>
               <div className="file-list">
                 {recentFiles.length === 0 ? (
                   <p className="file-empty">No files indexed yet. Click Sync to load your Drive.</p>
                 ) : (
                   recentFiles.map((f, i) => (
-                    <div key={i} className="file-item">
+                    <div
+                      key={i}
+                      className="file-item file-item--clickable"
+                      onClick={() => window.open(`https://drive.google.com/file/d/${f.drive_id}/view`, "_blank")}
+                    >
                       <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{color:"var(--text-3)",flexShrink:0}}>
                         <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>
                         <polyline points="14 2 14 8 20 8"/>
@@ -427,6 +470,70 @@ export default function App() {
           transition: all 0.15s;
         }
         .show-more-btn:hover { background: var(--accent-glow); border-color: var(--accent); }
+
+        /* Conversations sidebar section styles */
+        .new-conv-btn {
+          width: 100%;
+          padding: 8px 12px;
+          border-radius: 8px;
+          border: 1px solid var(--border);
+          background: var(--surface-2);
+          color: var(--text);
+          font-family: var(--font-body);
+          font-size: 13px;
+          font-weight: 500;
+          cursor: pointer;
+          margin-bottom: 10px;
+          transition: all 0.15s ease;
+          display: flex;
+          align-items: center;
+          justify-content: center;
+          gap: 6px;
+        }
+        .new-conv-btn:hover {
+          background: rgba(124, 107, 255, 0.1);
+          border-color: var(--accent);
+          color: var(--accent-2);
+        }
+        .thread-list {
+          display: flex;
+          flex-direction: column;
+          gap: 4px;
+          max-height: 200px;
+          overflow-y: auto;
+        }
+        .thread-item {
+          display: block;
+          width: 100%;
+          padding: 8px 10px;
+          border-radius: 6px;
+          border: none;
+          background: none;
+          font-family: var(--font-body);
+          font-size: 12.5px;
+          color: var(--text-2);
+          cursor: pointer;
+          text-align: left;
+          white-space: nowrap;
+          overflow: hidden;
+          text-overflow: ellipsis;
+          transition: all 0.12s ease;
+        }
+        .thread-item:hover {
+          background: var(--surface-2);
+          color: var(--text);
+        }
+        .thread-item--active {
+          background: rgba(124, 107, 255, 0.12) !important;
+          color: var(--accent-2) !important;
+          font-weight: 500;
+        }
+        .file-item--clickable {
+          cursor: pointer !important;
+        }
+        .file-item--clickable:hover {
+          color: var(--accent-2) !important;
+        }
 
         .session-info { display: flex; flex-direction: column; gap: 4px; }
         .session-row {
