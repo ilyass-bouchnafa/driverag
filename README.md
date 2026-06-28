@@ -41,7 +41,7 @@
 
 ## 🎯 Project Overview
 
-**DriveRAG** is a full-stack RAG application designed for engineering students at ENSA/IMT Mines Alès. It allows a student to:
+**DriveRAG** is a full-stack RAG application designed for engineering students at ENSA. It allows a student to:
 
 1. **Connect their Google Drive** containing lecture notes, slides, and course PDFs
 2. **Ask questions in natural language** (French, English, or Arabic)
